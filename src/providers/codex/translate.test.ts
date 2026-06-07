@@ -1,0 +1,102 @@
+import { test, expect } from "bun:test";
+import { buildResponsesRequest } from "./translate.ts";
+
+test("maps system to instructions, messages to input[], and effort to reasoning", () => {
+  const body = {
+    model: "shim",
+    stream: true,
+    messages: [
+      { role: "system", content: "be terse" },
+      { role: "user", content: "hi" },
+    ],
+  };
+  const out = buildResponsesRequest(body, { model: "gpt-5.4", effort: "high" });
+  expect(out.model).toBe("gpt-5.4");
+  expect(out.instructions).toBe("be terse");
+  expect(out.reasoning).toEqual({ effort: "high" });
+  expect(out.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "hi" }] }]);
+  expect(out.stream).toBe(true);
+  expect(out.store).toBe(false);
+});
+
+test("converts nested OpenAI tools to flat Responses function tools", () => {
+  const body = {
+    messages: [{ role: "user", content: "hi" }],
+    tools: [{ type: "function", function: { name: "Glob", description: "find", parameters: { type: "object", properties: {} } } }],
+  };
+  const out = buildResponsesRequest(body, { model: "gpt-5.4", effort: "low" });
+  expect(out.tools).toEqual([{ type: "function", name: "Glob", description: "find", parameters: { type: "object", properties: {} } }]);
+});
+
+test("maps assistant tool_calls to function_call and tool results to function_call_output", () => {
+  const body = {
+    messages: [
+      { role: "user", content: "go" },
+      { role: "assistant", content: [], tool_calls: [{ id: "call_1", type: "function", function: { name: "Glob", arguments: '{"x":1}' } }] },
+      { role: "tool", tool_call_id: "call_1", content: [{ type: "text", text: "res" }] },
+    ],
+  };
+  const out = buildResponsesRequest(body, { model: "gpt-5.4", effort: "low" });
+  expect(out.input).toEqual([
+    { role: "user", content: [{ type: "input_text", text: "go" }] },
+    { type: "function_call", call_id: "call_1", name: "Glob", arguments: '{"x":1}' },
+    { type: "function_call_output", call_id: "call_1", output: "res" },
+  ]);
+});
+
+// --- stream helpers ---
+import { responsesStreamToOpenAI } from "./translate.ts";
+function responsesSSE(events: Array<{ event: string; data: unknown }>): ReadableStream<Uint8Array> {
+  const enc = new TextEncoder();
+  const text = events.map((e) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`).join("");
+  return new ReadableStream<Uint8Array>({ start(c) { c.enqueue(enc.encode(text)); c.close(); } });
+}
+async function collectText(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stream.getReader();
+  const dec = new TextDecoder();
+  let out = "";
+  for (;;) { const { value, done } = await reader.read(); if (done) break; out += dec.decode(value, { stream: true }); }
+  return out;
+}
+function parseOpenAIChunks(sse: string): any[] {
+  return sse.split("\n\n").map((b) => b.replace(/^data: /, "").trim()).filter((d) => d.length > 0 && d !== "[DONE]").map((d) => JSON.parse(d));
+}
+
+test("translates Responses output_text deltas to OpenAI content chunks with usage and [DONE]", async () => {
+  const upstream = responsesSSE([
+    { event: "response.output_text.delta", data: { delta: "Hello" } },
+    { event: "response.output_text.delta", data: { delta: " world" } },
+    { event: "response.completed", data: { response: { status: "completed", usage: { input_tokens: 10, output_tokens: 5 } } } },
+  ]);
+  const out = await collectText(responsesStreamToOpenAI(upstream, { model: "gpt-5.4" }));
+  expect(out).toContain("data: [DONE]");
+  const chunks = parseOpenAIChunks(out);
+  const content = chunks.flatMap((c) => (typeof c.choices?.[0]?.delta?.content === "string" ? [c.choices[0].delta.content] : [])).join("");
+  expect(content).toBe("Hello world");
+  expect(chunks.find((c) => c.choices?.[0]?.finish_reason)?.choices[0].finish_reason).toBe("stop");
+  expect(chunks.find((c) => c.usage)?.usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+});
+
+test("translates Responses reasoning deltas to reasoning_content", async () => {
+  const upstream = responsesSSE([
+    { event: "response.reasoning_text.delta", data: { delta: "thinking..." } },
+    { event: "response.completed", data: { response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1 } } } },
+  ]);
+  const chunks = parseOpenAIChunks(await collectText(responsesStreamToOpenAI(upstream, { model: "gpt-5.4" })));
+  const r = chunks.flatMap((c) => (typeof c.choices?.[0]?.delta?.reasoning_content === "string" ? [c.choices[0].delta.reasoning_content] : [])).join("");
+  expect(r).toBe("thinking...");
+});
+
+test("translates Responses function_call streaming to OpenAI tool_calls", async () => {
+  const upstream = responsesSSE([
+    { event: "response.output_item.added", data: { item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "Glob" } } },
+    { event: "response.function_call_arguments.delta", data: { call_id: "call_1", delta: '{"x":' } },
+    { event: "response.function_call_arguments.delta", data: { call_id: "call_1", delta: "1}" } },
+    { event: "response.completed", data: { response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1 } } } },
+  ]);
+  const chunks = parseOpenAIChunks(await collectText(responsesStreamToOpenAI(upstream, { model: "gpt-5.4" })));
+  const toolDeltas = chunks.flatMap((c) => c.choices?.[0]?.delta?.tool_calls ?? []);
+  expect(toolDeltas.find((t: any) => t.id)).toMatchObject({ index: 0, id: "call_1", type: "function", function: { name: "Glob" } });
+  expect(toolDeltas.map((t: any) => t.function?.arguments ?? "").join("")).toBe('{"x":1}');
+  expect(chunks.find((c) => c.choices?.[0]?.finish_reason)?.choices[0].finish_reason).toBe("tool_calls");
+});
