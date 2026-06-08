@@ -51,6 +51,13 @@ test("formatPlanUsage renders a bar, percent, and reset countdown", () => {
   ).toBe("5h     [███████░░░]  71%  resets in 1h 2m");
 });
 
+test("formatPlanUsage appends a non-allowed status so throttling is visible", () => {
+  const now = 1_000_000_000_000;
+  expect(
+    formatPlanUsage("5h", { utilization: 1, resetAt: now + 60_000, status: "rejected" }, now),
+  ).toBe("5h     [██████████] 100%  resets in 1m  rejected");
+});
+
 test("formatPlanUsage clamps utilization into the bar and percent", () => {
   const now = 1_000_000_000_000;
   expect(formatPlanUsage("weekly", { utilization: 0, resetAt: now, status: "allowed" }, now)).toBe(

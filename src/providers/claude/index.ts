@@ -55,12 +55,22 @@ export const claudeProvider: Provider = {
     }
 
     // Capture plan usage from headers (separate from the body stream, so this
-    // never affects what Cursor receives). Telemetry must not break a request.
+    // never affects what Cursor receives). Parsing is cheap and inline; the
+    // sqlite write is deferred so it stays off the path that returns the stream.
+    // Best-effort throughout — telemetry must never break a request.
     try {
       const snapshot = parseAnthropicRateLimitHeaders(res.headers);
-      if (snapshot) recordPlanUsage("claude", snapshot);
+      if (snapshot) {
+        queueMicrotask(() => {
+          try {
+            recordPlanUsage("claude", snapshot);
+          } catch {
+            // ignore — usage capture is best-effort
+          }
+        });
+      }
     } catch {
-      // ignore — usage capture is best-effort
+      // ignore — header parsing is best-effort
     }
 
     return anthropicStreamToOpenAI(res.body, {

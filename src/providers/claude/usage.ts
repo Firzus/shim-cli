@@ -18,11 +18,14 @@ export interface HeaderBag {
 }
 
 /**
- * Normalize utilization to a 0–1 fraction. Anthropic sends a fraction, but be
- * defensive: a value above 1 must be a 0–100 percent, so fold it back.
+ * Clamp utilization into the canonical 0–1 fraction. Anthropic sends a fraction
+ * (verified in #11), so this is just a guard: an overage reading above 1 caps at
+ * "maxed" rather than being misread, and a negative caps at 0. We deliberately
+ * do NOT treat `> 1` as a 0–100 percent — that would fold a genuine 105% overage
+ * down to ~0.01, hiding the problem at the exact moment it matters.
  */
 function normalizeUtilization(raw: number): number {
-  return raw > 1 ? raw / 100 : raw;
+  return Math.max(0, Math.min(1, raw));
 }
 
 /**

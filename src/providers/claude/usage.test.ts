@@ -25,11 +25,18 @@ test("parseAnthropicRateLimitHeaders returns 5h + weekly with normalized shapes"
   });
 });
 
-test("parseAnthropicRateLimitHeaders normalizes a percent-scale utilization to a fraction", () => {
+test("parseAnthropicRateLimitHeaders clamps an overage utilization to 1, not down to ~0", () => {
   const h = liveHeaders();
-  h.set("anthropic-ratelimit-unified-5h-utilization", "71"); // some hypothetical 0–100 scale
+  h.set("anthropic-ratelimit-unified-5h-utilization", "1.05"); // 105% overage
   const snap = parseAnthropicRateLimitHeaders(h);
-  expect(snap?.fiveHour.utilization).toBeCloseTo(0.71, 5);
+  expect(snap?.fiveHour.utilization).toBe(1); // capped at maxed, not folded to 0.0105
+});
+
+test("parseAnthropicRateLimitHeaders clamps a negative utilization to 0", () => {
+  const h = liveHeaders();
+  h.set("anthropic-ratelimit-unified-5h-utilization", "-0.2");
+  const snap = parseAnthropicRateLimitHeaders(h);
+  expect(snap?.fiveHour.utilization).toBe(0);
 });
 
 test("parseAnthropicRateLimitHeaders passes through a reset already in milliseconds", () => {

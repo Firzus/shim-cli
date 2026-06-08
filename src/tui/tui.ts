@@ -75,14 +75,17 @@ const BAR_WIDTH = 10;
 
 /**
  * Render one plan-usage bar (without colour): `5h     [████░░░░░░]  71%  resets in 1h 2m`.
- * Utilization is a 0–1 fraction; the caller colours by `usageLevel`. Pure.
+ * Utilization is a 0–1 fraction; the caller colours by `usageLevel`. A status
+ * other than "allowed" (e.g. "rejected") is appended so a throttled window is
+ * visible, not just implied by the colour. Pure.
  */
 export function formatPlanUsage(label: string, window: PlanWindow, now: number): string {
   const frac = Math.max(0, Math.min(1, window.utilization));
   const filled = Math.round(frac * BAR_WIDTH);
   const bar = "█".repeat(filled) + "░".repeat(BAR_WIDTH - filled);
   const pct = Math.round(frac * 100);
-  return `${label.padEnd(7)}[${bar}] ${String(pct).padStart(3)}%  resets in ${formatResetCountdown(window.resetAt, now)}`;
+  const flag = window.status && window.status !== "allowed" ? `  ${window.status}` : "";
+  return `${label.padEnd(7)}[${bar}] ${String(pct).padStart(3)}%  resets in ${formatResetCountdown(window.resetAt, now)}${flag}`;
 }
 
 /**
@@ -167,7 +170,8 @@ export async function runTui(): Promise<void> {
     } else {
       const now = Date.now();
       const bar = (label: string, w: PlanWindow): string => {
-        const colour = usageLevel(w.utilization) === "crit" ? pc.red : usageLevel(w.utilization) === "warn" ? pc.yellow : pc.green;
+        const lvl = usageLevel(w.utilization);
+        const colour = lvl === "crit" ? pc.red : lvl === "warn" ? pc.yellow : pc.green;
         return `    ${colour(formatPlanUsage(label, w, now))}`;
       };
       lines.push(bar("5h", usage.fiveHour));
