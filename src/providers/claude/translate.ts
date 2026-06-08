@@ -12,6 +12,12 @@ export const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official C
 /** Cursor omits max_tokens but Anthropic requires it; default to a generous ceiling. */
 export const DEFAULT_MAX_TOKENS = 64000;
 
+/**
+ * 5-minute (ephemeral) prompt-cache breakpoint. Anthropic caching is opt-in:
+ * a block only caches if it carries this marker. See ADR-0001.
+ */
+export const CACHE_CONTROL = { type: "ephemeral" } as const;
+
 export interface ClaudeOptions {
   model: string;
   effort: Effort;
@@ -20,6 +26,7 @@ export interface ClaudeOptions {
 interface TextBlock {
   type: "text";
   text: string;
+  cache_control?: typeof CACHE_CONTROL;
 }
 
 export interface AnthropicBody {
@@ -87,6 +94,10 @@ export function buildAnthropicRequest(
   }
   flushToolResults();
 
+  // Cache the stable system prefix: mark the last block (identity + Cursor
+  // system prompt). The identity block always exists, so this is always safe.
+  system[system.length - 1]!.cache_control = CACHE_CONTROL;
+
   const maxTokens = typeof body.max_tokens === "number" ? body.max_tokens : DEFAULT_MAX_TOKENS;
   const req: AnthropicBody = {
     model: opts.model,
@@ -100,7 +111,12 @@ export function buildAnthropicRequest(
   return req;
 }
 
-/** Accepts both nested `{type:function, function:{...}}` and flat `{name, parameters}` tools. */
+/**
+ * Accepts both nested `{type:function, function:{...}}` and flat `{name, parameters}` tools.
+ * Tools are sorted alphabetically by name so the prefix is byte-identical across
+ * turns (Cursor/MCP can emit them in varying order), then the last entry carries
+ * the cache breakpoint. See ADR-0001.
+ */
 function mapTools(tools: unknown): Array<Record<string, unknown>> | undefined {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
   const out: Array<Record<string, unknown>> = [];
@@ -113,7 +129,10 @@ function mapTools(tools: unknown): Array<Record<string, unknown>> | undefined {
       input_schema: fn.parameters ?? fn.input_schema ?? { type: "object", properties: {} },
     });
   }
-  return out.length ? out : undefined;
+  if (out.length === 0) return undefined;
+  out.sort((a, b) => ((a.name as string) < (b.name as string) ? -1 : (a.name as string) > (b.name as string) ? 1 : 0));
+  out[out.length - 1]!.cache_control = CACHE_CONTROL;
+  return out;
 }
 
 /** Both models use adaptive thinking; only the effort vocabulary differs. */

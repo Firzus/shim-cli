@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { anthropicStreamToOpenAI, buildAnthropicRequest, CLAUDE_CODE_IDENTITY } from "./translate.ts";
+import { anthropicStreamToOpenAI, buildAnthropicRequest, CACHE_CONTROL, CLAUDE_CODE_IDENTITY } from "./translate.ts";
 
 // --- stream test helpers ---------------------------------------------------
 function anthropicSSE(events: Array<{ event: string; data: unknown }>): ReadableStream<Uint8Array> {
@@ -51,7 +51,8 @@ test("injects the Claude Code identity as the first system block, Cursor's syste
 
   expect(out.model).toBe("claude-sonnet-4-6");
   expect(out.system[0]).toEqual({ type: "text", text: CLAUDE_CODE_IDENTITY });
-  expect(out.system[1]).toEqual({ type: "text", text: "You are a coding assistant." });
+  // The last system block carries the cache breakpoint.
+  expect(out.system[1]).toEqual({ type: "text", text: "You are a coding assistant.", cache_control: CACHE_CONTROL });
   expect(out.messages[0]).toEqual({ role: "user", content: [{ type: "text", text: "hi" }] });
 });
 
@@ -97,8 +98,34 @@ test("converts nested OpenAI tools to Anthropic name/description/input_schema", 
       name: "Glob",
       description: "find files",
       input_schema: { type: "object", properties: { glob_pattern: { type: "string" } }, required: ["glob_pattern"] },
+      // Last (here only) tool carries the cache breakpoint.
+      cache_control: CACHE_CONTROL,
     },
   ]);
+});
+
+test("sorts tools alphabetically by name and marks only the last with cache_control", () => {
+  const tool = (name: string) => ({ type: "function", function: { name, description: "", parameters: {} } });
+  const body = {
+    messages: [{ role: "user", content: "hi" }],
+    tools: [tool("Write"), tool("Glob"), tool("Read")],
+  };
+  const out = buildAnthropicRequest(body, { model: "claude-sonnet-4-6", effort: "medium" });
+  const tools = out.tools as Array<Record<string, unknown>>;
+  // Deterministic order across turns regardless of input order.
+  expect(tools.map((t) => t.name)).toEqual(["Glob", "Read", "Write"]);
+  // Exactly one breakpoint, on the last entry.
+  expect(tools.filter((t) => t.cache_control).length).toBe(1);
+  expect(tools[0]!.cache_control).toBeUndefined();
+  expect(tools[tools.length - 1]!.cache_control).toEqual(CACHE_CONTROL);
+});
+
+test("emits no tools marker (and no error) when no tools are present", () => {
+  const body = { messages: [{ role: "user", content: "hi" }] };
+  const out = buildAnthropicRequest(body, { model: "claude-sonnet-4-6", effort: "medium" });
+  expect(out.tools).toBeUndefined();
+  // System still gets its breakpoint even with no tools.
+  expect(out.system[out.system.length - 1]!.cache_control).toEqual(CACHE_CONTROL);
 });
 
 test("converts assistant tool_calls to tool_use blocks (arguments parsed) and drops empty content", () => {
