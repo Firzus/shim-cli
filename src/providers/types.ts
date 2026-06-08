@@ -58,6 +58,13 @@ export interface ChatContext {
 
 export interface Provider {
   readonly id: ProviderId;
+  /**
+   * Whether this provider captures real plan-usage snapshots (from upstream
+   * rate-limit headers) into the store. The TUI scopes its plan-usage block to
+   * the active provider and uses this to tell "no data yet" (capable, not yet
+   * captured) from "n/a" (not capable, e.g. codex has no rate-limit headers).
+   */
+  readonly reportsPlanUsage: boolean;
   /** Concrete models this provider can serve, for the TUI selector. */
   models(): readonly ProviderModel[];
   /** Current auth state of the underlying credential source. */

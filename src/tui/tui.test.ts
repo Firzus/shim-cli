@@ -13,6 +13,7 @@ import {
   formatEndpoint,
   formatPlanUsage,
   formatResetCountdown,
+  optimisticReset,
   spinnerFrame,
   truncateDetail,
   usageLevel,
@@ -76,6 +77,20 @@ test("formatPlanUsage clamps utilization into the bar and percent", () => {
   expect(
     formatPlanUsage("5h", { utilization: 1.4, resetAt: now + 60_000, status: "allowed" }, now),
   ).toBe("5h     [██████████] 100%  resets in 1m");
+});
+
+test("optimisticReset forces utilization to 0 once now passes the reset boundary", () => {
+  const now = 1_000_000_000_000;
+  const window = { utilization: 0.71, resetAt: now - 1, status: "allowed" };
+  expect(optimisticReset(window, now)).toEqual({ utilization: 0, resetAt: now - 1, status: "allowed" });
+});
+
+test("optimisticReset leaves a window untouched before and exactly at the reset", () => {
+  const now = 1_000_000_000_000;
+  const future = { utilization: 0.71, resetAt: now + 1, status: "allowed" };
+  expect(optimisticReset(future, now)).toBe(future); // before reset: same reference, untouched
+  const atBoundary = { utilization: 0.71, resetAt: now, status: "allowed" };
+  expect(optimisticReset(atBoundary, now)).toBe(atBoundary); // not strictly past yet
 });
 
 test("formatActivityTokens shows the cached witness when cache reads landed", () => {

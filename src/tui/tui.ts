@@ -105,6 +105,18 @@ export function formatPlanUsage(label: string, window: PlanWindow, now: number):
 }
 
 /**
+ * Optimistic reset: once `now` passes a window's reset boundary, force its
+ * utilization to 0 before formatting, so a passed reset reads as a fresh 0%
+ * window rather than a stale frozen percent. Otherwise the window is returned
+ * untouched. Pure — the accepted under-report trade-off is documented in
+ * ADR-0002 (plan usage is the authoritative signal, captured from headers).
+ */
+export function optimisticReset(window: PlanWindow, now: number): PlanWindow {
+  if (now > window.resetAt) return { ...window, utilization: 0 };
+  return window;
+}
+
+/**
  * Render the cache-rate line body (without color) for the active period.
  * Returns the dim dash form when there is no usable input data in the window.
  */
@@ -434,6 +446,18 @@ export async function runTui(): Promise<void> {
       : new StyledText([dim("(no activity yet)")]);
   };
 
+  // Collapse the plan-usage sub-area (width 0, hidden) when the active provider
+  // has no plan usage, so the cache-rate + counters sub-area reclaims the space;
+  // guarded so the layout only reflows on an actual state change.
+  let planCollapsed = false;
+  const setPlanCollapsed = (collapsed: boolean): void => {
+    if (collapsed === planCollapsed) return;
+    planCollapsed = collapsed;
+    metricsLeft.visible = !collapsed;
+    metricsLeft.flexGrow = collapsed ? 0 : 1;
+    metricsLeft.width = collapsed ? 0 : "auto";
+  };
+
   // --- render: data → props ------------------------------------------------
   const render = (): void => {
     const now = Date.now();
@@ -470,17 +494,28 @@ export async function runTui(): Promise<void> {
     cachedRows = recentActivity(streamInner().h);
     renderStream(now);
 
-    // bottom-left: plan usage (scoped to the active provider in slice 6)
-    const usage = getPlanUsage("claude");
-    if (!usage) {
-      planText.content = new StyledText([dim("plan usage (claude)  (no data yet)")]);
+    // bottom-left: plan usage, scoped to the active provider. A provider that
+    // does not capture plan usage (e.g. codex) collapses the block so the right
+    // sub-area reclaims the space; a capable provider with no snapshot yet shows
+    // "no data yet"; otherwise two bars, each optimistically reset once its
+    // window's reset boundary has passed.
+    const provider = getProvider(sel.provider);
+    if (!provider.reportsPlanUsage) {
+      setPlanCollapsed(true);
     } else {
-      const bar = (label: string, w: PlanWindow): StyledText => {
-        const lvl = usageLevel(w.utilization);
-        const color = lvl === "crit" ? red : lvl === "warn" ? yellow : green;
-        return new StyledText([color(formatPlanUsage(label, w, now))]);
-      };
-      planText.content = joinLines([bar("5h", usage.fiveHour), bar("weekly", usage.weekly)]);
+      setPlanCollapsed(false);
+      const usage = getPlanUsage(sel.provider);
+      if (!usage) {
+        planText.content = new StyledText([dim(`plan usage (${sel.provider})  (no data yet)`)]);
+      } else {
+        const bar = (label: string, raw: PlanWindow): StyledText => {
+          const w = optimisticReset(raw, now);
+          const lvl = usageLevel(w.utilization);
+          const color = lvl === "crit" ? red : lvl === "warn" ? yellow : green;
+          return new StyledText([color(formatPlanUsage(label, w, now))]);
+        };
+        planText.content = joinLines([bar("5h", usage.fiveHour), bar("weekly", usage.weekly)]);
+      }
     }
 
     // bottom-right: windowed cache rate + counters. The `w` period scopes the

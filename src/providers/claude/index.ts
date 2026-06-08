@@ -22,6 +22,7 @@ const MODELS: readonly ProviderModel[] = [
 
 export const claudeProvider: Provider = {
   id: "claude",
+  reportsPlanUsage: true,
   models() {
     return MODELS;
   },
