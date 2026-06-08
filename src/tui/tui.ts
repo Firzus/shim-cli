@@ -16,7 +16,8 @@ import {
 import { PORT, TUNNEL_HOSTNAME } from "../config.ts";
 import { allProviders, getProvider } from "../providers/registry.ts";
 import {
-  cacheTotals,
+  CACHE_RATE_SAMPLE,
+  cacheTotalsRecent,
   DEFAULT_PERIOD,
   getPlanUsage,
   getSelection,
@@ -117,22 +118,26 @@ export function optimisticReset(window: PlanWindow, now: number): PlanWindow {
 }
 
 /**
- * Render the cache-rate line body (without color) for the active period.
- * Returns the dim dash form when there is no usable input data in the window.
+ * Render the cache-rate line body (without color) over the last `sample`
+ * measured requests. Returns the dim dash form when there is no usable input.
  */
-export function formatCacheRate(totals: { cached: number; input: number }, period: Period): string {
-  if (totals.input <= 0) return `cache rate (${period})  —`;
+export function formatCacheRate(totals: { cached: number; input: number }, sample: number): string {
+  if (totals.input <= 0) return `cache rate (last ${sample})  —`;
   const pct = Math.round((totals.cached / totals.input) * 100);
-  return `cache rate (${period})  ${pct}%  (${abbreviateCount(totals.cached)} cached / ${abbreviateCount(totals.input)} input)`;
+  return `cache rate (last ${sample})  ${pct}%  (${abbreviateCount(totals.cached)} cached / ${abbreviateCount(totals.input)} input)`;
 }
 
 /**
  * The counters line for the metrics panel: requests + errors over the selected
- * window, plus the live in-flight count (point-in-time, not windowed). Counts
- * are abbreviated like the rest of the panel. Pure.
+ * `w` period, plus the live in-flight count (point-in-time, not windowed). The
+ * period label is shown so the `w` key's target is legible now that it scopes
+ * the counters only. Counts are abbreviated like the rest of the panel. Pure.
  */
-export function formatCounters(c: { requests: number; errors: number; inFlight: number }): string {
-  return `requests ${abbreviateCount(c.requests)}  ·  errors ${abbreviateCount(c.errors)}  ·  in-flight ${abbreviateCount(c.inFlight)}`;
+export function formatCounters(
+  c: { requests: number; errors: number; inFlight: number },
+  period: Period,
+): string {
+  return `requests ${abbreviateCount(c.requests)}  ·  errors ${abbreviateCount(c.errors)}  ·  in-flight ${abbreviateCount(c.inFlight)}  (${period})`;
 }
 
 /** Minimum terminal size the three-zone chrome needs to render legibly. */
@@ -560,13 +565,16 @@ export async function runTui(): Promise<void> {
       }
     }
 
-    // bottom-right: windowed cache rate + counters. The `w` period scopes the
-    // cache rate AND the request/error counters together; in-flight is live.
+    // bottom-right: live cache rate + counters. The cache rate is scoped to the
+    // last N measured requests (converges within one response); the `w` period
+    // scopes only the request/error counters. In-flight is live.
     const since = periodSince(period, now);
     const counters = { ...windowedCounters(since), inFlight: pendingCount() };
+    // One source for the sample size so the totals and the label can't drift.
+    const sample = CACHE_RATE_SAMPLE;
     rightText.content = joinLines([
-      new StyledText([dim(formatCacheRate(cacheTotals(since), period))]),
-      new StyledText([dim(formatCounters(counters))]),
+      new StyledText([dim(formatCacheRate(cacheTotalsRecent(sample), sample))]),
+      new StyledText([dim(formatCounters(counters, period))]),
     ]);
 
     hintsText.content = new StyledText([dim("p provider · m model · e effort · w window · q quit")]);

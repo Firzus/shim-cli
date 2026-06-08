@@ -128,30 +128,30 @@ test("formatActivityTokens is empty when no token counts were recorded", () => {
 });
 
 test("formatCacheRate renders an integer percentage with abbreviated counts", () => {
-  expect(formatCacheRate({ cached: 1200, input: 2700 }, "24h")).toBe(
-    "cache rate (24h)  44%  (1.2k cached / 2.7k input)",
+  expect(formatCacheRate({ cached: 1200, input: 2700 }, 20)).toBe(
+    "cache rate (last 20)  44%  (1.2k cached / 2.7k input)",
   );
 });
 
 test("formatCacheRate rounds the percentage to an integer", () => {
-  expect(formatCacheRate({ cached: 1, input: 3 }, "24h")).toBe(
-    "cache rate (24h)  33%  (1 cached / 3 input)",
+  expect(formatCacheRate({ cached: 1, input: 3 }, 20)).toBe(
+    "cache rate (last 20)  33%  (1 cached / 3 input)",
   );
 });
 
-test("formatCacheRate surfaces the active period label", () => {
-  expect(formatCacheRate({ cached: 1, input: 2 }, "7d")).toBe(
-    "cache rate (7d)  50%  (1 cached / 2 input)",
+test("formatCacheRate surfaces the sample size in the label", () => {
+  expect(formatCacheRate({ cached: 1, input: 2 }, 50)).toBe(
+    "cache rate (last 50)  50%  (1 cached / 2 input)",
   );
-  expect(formatCacheRate({ cached: 0, input: 0 }, "all")).toBe("cache rate (all)  —");
+  expect(formatCacheRate({ cached: 0, input: 0 }, 50)).toBe("cache rate (last 50)  —");
 });
 
 test("formatCacheRate shows a dim dash when there is no usable input", () => {
-  expect(formatCacheRate({ cached: 0, input: 0 }, "24h")).toBe("cache rate (24h)  —");
+  expect(formatCacheRate({ cached: 0, input: 0 }, 20)).toBe("cache rate (last 20)  —");
 });
 
 test("formatCacheRate treats negative input as the empty state", () => {
-  expect(formatCacheRate({ cached: 0, input: -5 }, "24h")).toBe("cache rate (24h)  —");
+  expect(formatCacheRate({ cached: 0, input: -5 }, 20)).toBe("cache rate (last 20)  —");
 });
 
 test("isTerminalTooSmall guards below the minimum on either axis", () => {
@@ -161,15 +161,15 @@ test("isTerminalTooSmall guards below the minimum on either axis", () => {
   expect(isTerminalTooSmall(120, 40)).toBe(false); // roomy
 });
 
-test("formatCounters renders requests, errors, and the live in-flight count", () => {
-  expect(formatCounters({ requests: 128, errors: 3, inFlight: 2 })).toBe(
-    "requests 128  ·  errors 3  ·  in-flight 2",
+test("formatCounters renders requests, errors, in-flight, and the period label", () => {
+  expect(formatCounters({ requests: 128, errors: 3, inFlight: 2 }, "24h")).toBe(
+    "requests 128  ·  errors 3  ·  in-flight 2  (24h)",
   );
 });
 
 test("formatCounters abbreviates large counts like the rest of the panel", () => {
-  expect(formatCounters({ requests: 12_000, errors: 0, inFlight: 0 })).toBe(
-    "requests 12k  ·  errors 0  ·  in-flight 0",
+  expect(formatCounters({ requests: 12_000, errors: 0, inFlight: 0 }, "7d")).toBe(
+    "requests 12k  ·  errors 0  ·  in-flight 0  (7d)",
   );
 });
 

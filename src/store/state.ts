@@ -6,8 +6,16 @@ import type { Effort, ProviderId, Selection } from "../providers/types.ts";
 export const PERIODS = ["5h", "24h", "7d", "30d", "all"] as const;
 export type Period = (typeof PERIODS)[number];
 
-/** Cache rate windows to 24h by default — recent enough to read the live signal. */
+/** Counters window to 24h by default — recent enough to read the live signal. */
 export const DEFAULT_PERIOD: Period = "24h";
+
+/**
+ * Cache rate is scoped to the last N *measured* requests, not a time window. One
+ * Cursor response is a burst of proxy requests, so a request-count window
+ * converges within a single response and never lingers behind stale history the
+ * way a time window does. See ADR-0003.
+ */
+export const CACHE_RATE_SAMPLE = 20;
 
 const PERIOD_MS: Record<Exclude<Period, "all">, number> = {
   "5h": 5 * 60 * 60 * 1000,
@@ -133,29 +141,35 @@ export function recentActivity(limit = 50): ActivityRow[] {
 }
 
 /**
- * Token-weighted cache totals over a bounded window — rows with `ts >= since`
- * (all statuses). NULL `cached_tokens` (pre-migration rows) count as 0. The
- * cache rate is `cached / input`. Windowing keeps cold pre-cache history out of
- * the denominator; pass `since = 0` for the whole table. `db` is injectable for
- * tests against a temporary database.
+ * Token-weighted cache totals over the last `n` **measured** requests (newest
+ * by id). A row is measured only when both token columns are present; a NULL in
+ * either is *unmeasured* — a pending request, or one recorded by an older build
+ * that never reported cache tokens — and is excluded outright, not counted as a
+ * 0% miss that would drag the rate down. The cache rate is `cached / input`.
+ * `db` is injectable for tests against a temporary database. See ADR-0003.
  */
-export function cacheTotals(since = 0, db: Database = getDb()): { cached: number; input: number } {
+export function cacheTotalsRecent(
+  n = CACHE_RATE_SAMPLE,
+  db: Database = getDb(),
+): { cached: number; input: number } {
   const row = db
     .query(
       `SELECT COALESCE(SUM(cached_tokens), 0) AS cached,
               COALESCE(SUM(prompt_tokens), 0) AS input
-         FROM activity WHERE ts >= $since`,
+         FROM (SELECT cached_tokens, prompt_tokens FROM activity
+                WHERE cached_tokens IS NOT NULL AND prompt_tokens IS NOT NULL
+                ORDER BY id DESC LIMIT $n)`,
     )
-    .get({ $since: since }) as { cached: number; input: number };
+    .get({ $n: n }) as { cached: number; input: number };
   return { cached: row.cached, input: row.input };
 }
 
 /**
  * Request + error counts over a bounded window — rows with `ts >= since`.
  * `requests` is every row in the window (all statuses); `errors` is the subset
- * with `status = 'error'`. Shares the `w` period with the cache rate, so all
- * windowed metrics read one consistent window. Pass `since = 0` for the whole
- * table. `db` is injectable for tests against a temporary database.
+ * with `status = 'error'`. The `w` period scopes these counters only; the cache
+ * rate is request-count scoped (see [[cacheTotalsRecent]]). Pass `since = 0` for
+ * the whole table. `db` is injectable for tests against a temporary database.
  */
 export function windowedCounters(
   since = 0,
