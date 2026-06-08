@@ -209,7 +209,7 @@ test("translates tool_use content blocks to OpenAI tool_calls with fragmented ar
 });
 
 test("emits a final usage chunk from Anthropic input/output tokens and reports usage", async () => {
-  let reported: { promptTokens?: number; completionTokens?: number } | undefined;
+  let reported: { promptTokens?: number; completionTokens?: number; cachedTokens?: number } | undefined;
   const upstream = anthropicSSE([
     { event: "message_start", data: { type: "message_start", message: { id: "m", usage: { input_tokens: 42, output_tokens: 1 } } } },
     { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
@@ -223,5 +223,39 @@ test("emits a final usage chunk from Anthropic input/output tokens and reports u
   );
   const usageChunk = chunks.find((c) => c.usage);
   expect(usageChunk?.usage).toEqual({ prompt_tokens: 42, completion_tokens: 17, total_tokens: 59 });
-  expect(reported).toEqual({ promptTokens: 42, completionTokens: 17 });
+  expect(reported).toEqual({ promptTokens: 42, completionTokens: 17, cachedTokens: 0 });
+});
+
+test("normalizes the reported prompt total to include cache, but keeps the Cursor-facing chunk's raw input_tokens", async () => {
+  let reported: { promptTokens?: number; completionTokens?: number; cachedTokens?: number } | undefined;
+  const upstream = anthropicSSE([
+    {
+      event: "message_start",
+      data: {
+        type: "message_start",
+        message: {
+          id: "m",
+          usage: {
+            input_tokens: 42,
+            output_tokens: 1,
+            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 8,
+          },
+        },
+      },
+    },
+    { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
+    { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } } },
+    { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+    { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 17 } } },
+    { event: "message_stop", data: { type: "message_stop" } },
+  ]);
+  const chunks = parseOpenAIChunks(
+    await collectText(anthropicStreamToOpenAI(upstream, { model: "claude-sonnet-4-6", report: (u) => { reported = u; } })),
+  );
+  // The chunk streamed to Cursor must keep the raw input_tokens (cache excluded).
+  const usageChunk = chunks.find((c) => c.usage);
+  expect(usageChunk?.usage).toEqual({ prompt_tokens: 42, completion_tokens: 17, total_tokens: 59 });
+  // The store report normalizes prompt total = input + cache_read + cache_creation.
+  expect(reported).toEqual({ promptTokens: 150, completionTokens: 17, cachedTokens: 100 });
 });

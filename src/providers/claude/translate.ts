@@ -155,7 +155,7 @@ function extractText(content: unknown): string {
 
 export interface StreamOptions {
   model: string;
-  report?: (usage: { promptTokens?: number; completionTokens?: number }) => void;
+  report?: (usage: { promptTokens?: number; completionTokens?: number; cachedTokens?: number }) => void;
 }
 
 export function anthropicStreamToOpenAI(
@@ -167,7 +167,9 @@ export function anthropicStreamToOpenAI(
   const created = Math.floor(Date.now() / 1000);
   let roleEmitted = false;
   let finishReason: string | null = null;
-  let inputTokens = 0;
+  let inputTokens = 0; // raw, EXCLUDING cache (as Anthropic reports it).
+  let cacheReadTokens = 0;
+  let cacheCreationTokens = 0;
   let outputTokens = 0; // Anthropic reports this CUMULATIVELY in message_delta.
   // Anthropic content-block index -> sequential OpenAI tool_call index.
   const toolIndexByBlock = new Map<number, number>();
@@ -193,6 +195,10 @@ export function anthropicStreamToOpenAI(
                 | undefined;
               if (typeof usage?.input_tokens === "number") inputTokens = usage.input_tokens;
               if (typeof usage?.output_tokens === "number") outputTokens = usage.output_tokens;
+              if (typeof usage?.cache_read_input_tokens === "number")
+                cacheReadTokens = usage.cache_read_input_tokens;
+              if (typeof usage?.cache_creation_input_tokens === "number")
+                cacheCreationTokens = usage.cache_creation_input_tokens;
               break;
             }
             case "content_block_start": {
@@ -237,6 +243,9 @@ export function anthropicStreamToOpenAI(
           }
         }
         emit({}, finishReason ?? "stop");
+        // The chunk streamed to Cursor keeps Anthropic's raw `input_tokens`
+        // (cache excluded). Only the value reported to the store is normalized
+        // to the full input so the session cache rate is coherent.
         const usageChunk = {
           id,
           object: "chat.completion.chunk",
@@ -250,7 +259,11 @@ export function anthropicStreamToOpenAI(
           },
         };
         controller.enqueue(enc.encode(sse(usageChunk)));
-        opts.report?.({ promptTokens: inputTokens, completionTokens: outputTokens });
+        opts.report?.({
+          promptTokens: inputTokens + cacheReadTokens + cacheCreationTokens,
+          completionTokens: outputTokens,
+          cachedTokens: cacheReadTokens,
+        });
         controller.enqueue(enc.encode(SSE_DONE));
         controller.close();
       } catch (err) {

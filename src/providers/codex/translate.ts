@@ -121,21 +121,35 @@ function extractText(content: unknown): string {
 
 export interface StreamOptions {
   model: string;
-  report?: (usage: { promptTokens?: number; completionTokens?: number }) => void;
+  report?: (usage: { promptTokens?: number; completionTokens?: number; cachedTokens?: number }) => void;
 }
 
 interface ChatUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** Cached input tokens; a subset already included in prompt_tokens. */
+  cached_tokens: number;
 }
 
 function mapUsage(raw: unknown): ChatUsage | null {
   if (!raw || typeof raw !== "object") return null;
-  const u = raw as { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+  const u = raw as {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+    input_tokens_details?: { cached_tokens?: number };
+  };
   const input = u.input_tokens ?? 0;
   const output = u.output_tokens ?? 0;
-  return { prompt_tokens: input, completion_tokens: output, total_tokens: u.total_tokens ?? input + output };
+  // Responses `input_tokens` already INCLUDES cache, so prompt total is unchanged.
+  const cached = u.input_tokens_details?.cached_tokens ?? 0;
+  return {
+    prompt_tokens: input,
+    completion_tokens: output,
+    total_tokens: u.total_tokens ?? input + output,
+    cached_tokens: cached,
+  };
 }
 
 export function responsesStreamToOpenAI(
@@ -220,8 +234,17 @@ export function responsesStreamToOpenAI(
         }
         if (!finishEmitted) emit({}, "stop");
         if (finalUsage) {
-          controller.enqueue(enc.encode(sse({ id, object: "chat.completion.chunk", created, model: opts.model, choices: [], usage: finalUsage })));
-          opts.report?.({ promptTokens: finalUsage.prompt_tokens, completionTokens: finalUsage.completion_tokens });
+          const usage = {
+            prompt_tokens: finalUsage.prompt_tokens,
+            completion_tokens: finalUsage.completion_tokens,
+            total_tokens: finalUsage.total_tokens,
+          };
+          controller.enqueue(enc.encode(sse({ id, object: "chat.completion.chunk", created, model: opts.model, choices: [], usage })));
+          opts.report?.({
+            promptTokens: finalUsage.prompt_tokens,
+            completionTokens: finalUsage.completion_tokens,
+            cachedTokens: finalUsage.cached_tokens,
+          });
         }
         controller.enqueue(enc.encode(SSE_DONE));
         controller.close();
