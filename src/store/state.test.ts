@@ -1,7 +1,8 @@
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
-  cacheTotals,
+  CACHE_RATE_SAMPLE,
+  cacheTotalsRecent,
   DEFAULT_PERIOD,
   getPlanUsage,
   nextPeriod,
@@ -46,56 +47,77 @@ test("the default launch period is 24h", () => {
   expect(DEFAULT_PERIOD).toBe("24h");
 });
 
-/** Build a throwaway activity table with the columns cacheTotals reads. */
-function seedDb(rows: Array<{ ts: number; cached: number | null; input: number | null }>): Database {
+/**
+ * Build a throwaway activity table with the columns cacheTotalsRecent reads.
+ * Rows are inserted in array order, so `id` ascends with the array index —
+ * the last array entry is the newest request.
+ */
+function seedDb(rows: Array<{ cached: number | null; input: number | null }>): Database {
   const db = new Database(":memory:");
   db.exec(`
     CREATE TABLE activity (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts            INTEGER NOT NULL,
       cached_tokens INTEGER,
       prompt_tokens INTEGER
     );
   `);
   const insert = db.query(
-    "INSERT INTO activity (ts, cached_tokens, prompt_tokens) VALUES ($ts, $cached, $input)",
+    "INSERT INTO activity (cached_tokens, prompt_tokens) VALUES ($cached, $input)",
   );
-  for (const r of rows) insert.run({ $ts: r.ts, $cached: r.cached, $input: r.input });
+  for (const r of rows) insert.run({ $cached: r.cached, $input: r.input });
   return db;
 }
 
-test("cacheTotals sums only rows inside the window", () => {
-  const now = 1_000_000_000_000;
-  const db = seedDb([
-    { ts: now - 2 * HOUR, cached: 80, input: 100 }, // inside
-    { ts: now - 10 * HOUR, cached: 999, input: 999 }, // outside 5h
-  ]);
-  expect(cacheTotals(periodSince("5h", now), db)).toEqual({ cached: 80, input: 100 });
+test("the cache-rate sample is the last 20 requests", () => {
+  expect(CACHE_RATE_SAMPLE).toBe(20);
 });
 
-test("cold rows older than the window do not drag the rate toward 0%", () => {
-  const now = 1_000_000_000_000;
-  // One fresh warm row (90% cached) plus old cold first-turn rows (0% cached).
+test("cacheTotalsRecent sums only the last n measured requests (newest by id)", () => {
   const db = seedDb([
-    { ts: now - HOUR, cached: 90, input: 100 },
-    { ts: now - 2 * DAY, cached: 0, input: 100 },
-    { ts: now - 3 * DAY, cached: 0, input: 100 },
+    { cached: 10, input: 100 }, // oldest — outside a 2-request sample
+    { cached: 90, input: 100 },
+    { cached: 80, input: 100 }, // newest
   ]);
-  const windowed = cacheTotals(periodSince("24h", now), db);
-  expect(windowed).toEqual({ cached: 90, input: 100 }); // 90%, not buried
-  const allTime = cacheTotals(periodSince("all", now), db);
-  expect(allTime).toEqual({ cached: 90, input: 300 }); // 30% — the buried signal
+  expect(cacheTotalsRecent(2, db)).toEqual({ cached: 170, input: 200 }); // last two
+  expect(cacheTotalsRecent(20, db)).toEqual({ cached: 180, input: 300 }); // all three
 });
 
-test("cacheTotals treats NULL token counts as 0 and is empty on an empty window", () => {
-  const now = 1_000_000_000_000;
+test("cacheTotalsRecent excludes unmeasured rows instead of scoring them 0%", () => {
+  // A NULL cached_tokens row is unmeasured (pending, or an old build that never
+  // reported) — it must not enter the denominator as a 0% miss.
   const db = seedDb([
-    { ts: now - HOUR, cached: null, input: 100 },
-    { ts: now - 2 * HOUR, cached: 50, input: null },
+    { cached: 90, input: 100 }, // measured, 90%
+    { cached: null, input: 40_000 }, // unmeasured — excluded outright
   ]);
-  expect(cacheTotals(periodSince("24h", now), db)).toEqual({ cached: 50, input: 100 });
-  // Window with no rows: COALESCE keeps the shape as zeros, not NULL.
-  expect(cacheTotals(now + DAY, db)).toEqual({ cached: 0, input: 0 });
+  expect(cacheTotalsRecent(20, db)).toEqual({ cached: 90, input: 100 }); // 90%, not ~0%
+});
+
+test("cacheTotalsRecent samples the last n MEASURED rows, skipping newer unmeasured ones", () => {
+  // Newest rows are unmeasured; the sample must still reach back to the measured
+  // ones rather than collapse to empty.
+  const db = seedDb([
+    { cached: 80, input: 100 }, // measured
+    { cached: 70, input: 100 }, // measured
+    { cached: null, input: 40_000 }, // newest, unmeasured
+    { cached: null, input: 40_000 }, // newest, unmeasured
+  ]);
+  expect(cacheTotalsRecent(2, db)).toEqual({ cached: 150, input: 200 });
+});
+
+test("cacheTotalsRecent excludes a row with a NULL prompt_tokens too", () => {
+  // A measured cached count but a missing denominator is still unmeasured — it
+  // must not add to the numerator without a matching input.
+  const db = seedDb([
+    { cached: 90, input: 100 }, // fully measured
+    { cached: 50, input: null }, // cached present, input missing — excluded
+  ]);
+  expect(cacheTotalsRecent(20, db)).toEqual({ cached: 90, input: 100 });
+});
+
+test("cacheTotalsRecent is empty (zeros, not NULL) when no measured rows exist", () => {
+  const db = seedDb([{ cached: null, input: 100 }]);
+  expect(cacheTotalsRecent(20, db)).toEqual({ cached: 0, input: 0 });
+  expect(cacheTotalsRecent(20, seedDb([]))).toEqual({ cached: 0, input: 0 });
 });
 
 /** Build a throwaway activity table with the columns the counters reads need. */
