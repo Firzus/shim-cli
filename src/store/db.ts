@@ -30,11 +30,27 @@ export function getDb(): Database {
       status            TEXT NOT NULL,
       prompt_tokens     INTEGER,
       completion_tokens INTEGER,
+      cached_tokens     INTEGER,
       duration_ms       INTEGER,
       note              TEXT
     );
     CREATE INDEX IF NOT EXISTS activity_ts ON activity (ts DESC);
   `);
+  migrateActivityColumns(d);
   db = d;
   return d;
+}
+
+/**
+ * Add columns introduced after a database was first created. SQLite has no
+ * `ADD COLUMN IF NOT EXISTS`, so each addition is guarded by a PRAGMA check —
+ * keeping pre-existing databases migrated without data loss.
+ */
+function migrateActivityColumns(d: Database): void {
+  const existing = new Set(
+    (d.query("PRAGMA table_info(activity)").all() as { name: string }[]).map((c) => c.name),
+  );
+  if (!existing.has("cached_tokens")) {
+    d.exec("ALTER TABLE activity ADD COLUMN cached_tokens INTEGER;");
+  }
 }

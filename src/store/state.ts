@@ -40,6 +40,7 @@ export interface ActivityRow {
   status: string;
   prompt_tokens: number | null;
   completion_tokens: number | null;
+  cached_tokens: number | null;
   duration_ms: number | null;
   note: string | null;
 }
@@ -73,6 +74,7 @@ export function finishActivity(
     status: string;
     promptTokens?: number;
     completionTokens?: number;
+    cachedTokens?: number;
     durationMs?: number;
     note?: string;
   },
@@ -80,13 +82,14 @@ export function finishActivity(
   getDb()
     .query(
       `UPDATE activity SET status = $status, prompt_tokens = $pt, completion_tokens = $ct,
-         duration_ms = $dur, note = $note WHERE id = $id`,
+         cached_tokens = $cached, duration_ms = $dur, note = $note WHERE id = $id`,
     )
     .run({
       $id: id,
       $status: outcome.status,
       $pt: outcome.promptTokens ?? null,
       $ct: outcome.completionTokens ?? null,
+      $cached: outcome.cachedTokens ?? null,
       $dur: outcome.durationMs ?? null,
       $note: outcome.note ?? null,
     });
@@ -96,4 +99,20 @@ export function recentActivity(limit = 50): ActivityRow[] {
   return getDb()
     .query("SELECT * FROM activity ORDER BY id DESC LIMIT $limit")
     .all({ $limit: limit }) as ActivityRow[];
+}
+
+/**
+ * Token-weighted cache totals across the entire activity table (all statuses).
+ * NULL `cached_tokens` (pre-migration rows) count as 0. The session cache rate
+ * is `cached / input`.
+ */
+export function cacheTotals(): { cached: number; input: number } {
+  const row = getDb()
+    .query(
+      `SELECT COALESCE(SUM(cached_tokens), 0) AS cached,
+              COALESCE(SUM(prompt_tokens), 0) AS input
+         FROM activity`,
+    )
+    .get() as { cached: number; input: number };
+  return { cached: row.cached, input: row.input };
 }

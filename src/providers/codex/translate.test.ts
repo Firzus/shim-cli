@@ -77,6 +77,28 @@ test("translates Responses output_text deltas to OpenAI content chunks with usag
   expect(chunks.find((c) => c.usage)?.usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
 });
 
+test("reports cached_tokens from input_tokens_details with prompt total unchanged", async () => {
+  let reported: { promptTokens?: number; completionTokens?: number; cachedTokens?: number } | undefined;
+  const upstream = responsesSSE([
+    { event: "response.output_text.delta", data: { delta: "hi" } },
+    {
+      event: "response.completed",
+      data: {
+        response: {
+          status: "completed",
+          usage: { input_tokens: 100, output_tokens: 5, input_tokens_details: { cached_tokens: 80 } },
+        },
+      },
+    },
+  ]);
+  const chunks = parseOpenAIChunks(
+    await collectText(responsesStreamToOpenAI(upstream, { model: "gpt-5.4", report: (u) => { reported = u; } })),
+  );
+  // input_tokens already includes cache, so the prompt total is unchanged.
+  expect(chunks.find((c) => c.usage)?.usage).toEqual({ prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 });
+  expect(reported).toEqual({ promptTokens: 100, completionTokens: 5, cachedTokens: 80 });
+});
+
 test("translates Responses reasoning deltas to reasoning_content", async () => {
   const upstream = responsesSSE([
     { event: "response.reasoning_text.delta", data: { delta: "thinking..." } },
