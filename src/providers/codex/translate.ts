@@ -27,7 +27,6 @@ export interface ResponsesBody {
   store: false;
   reasoning?: { effort: string };
   tools?: unknown[];
-  [k: string]: unknown;
 }
 
 export function buildResponsesRequest(
@@ -162,6 +161,7 @@ export function responsesStreamToOpenAI(
   let roleEmitted = false;
   let finishEmitted = false;
   const toolCalls = new Map<string, { index: number; id: string }>();
+  let lastTool: { index: number; id: string } | undefined;
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -196,6 +196,7 @@ export function responsesStreamToOpenAI(
                 const tc = { index: toolCalls.size, id: callId };
                 toolCalls.set(callId, tc);
                 if (item.id && item.id !== callId) toolCalls.set(item.id, tc);
+                lastTool = tc;
                 emit({ tool_calls: [{ index: tc.index, id: callId, type: "function", function: { name: item.name ?? "", arguments: "" } }] });
               }
               break;
@@ -204,7 +205,7 @@ export function responsesStreamToOpenAI(
             case "response.custom_tool_call_input.delta": {
               const data = ev.data as { delta?: string; item_id?: string; call_id?: string };
               const key = data.call_id ?? data.item_id ?? "";
-              const target = (key ? toolCalls.get(key) : undefined) ?? Array.from(toolCalls.values()).at(-1);
+              const target = (key ? toolCalls.get(key) : undefined) ?? lastTool;
               if (target && data.delta) {
                 emit({ tool_calls: [{ index: target.index, function: { arguments: data.delta } }] });
               }

@@ -32,6 +32,11 @@ import {
 } from "../store/state.ts";
 import type { AuthStatus, Effort, ProviderId, Selection } from "../providers/types.ts";
 
+/** Keep the current effort if the target model supports it, else fall back to its first (or "medium"). */
+export function preserveEffort(efforts: readonly Effort[], current: Effort): Effort {
+  return efforts.includes(current) ? current : (efforts[0] ?? "medium");
+}
+
 /** Abbreviate a count with k/M suffixes above 1000 (e.g. 1234 → "1.2k"). */
 export function abbreviateCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
@@ -475,9 +480,9 @@ export async function runTui(): Promise<void> {
     h: stream.height > 2 ? stream.height - 2 : 8,
     w: stream.width > 4 ? stream.width - 4 : 40,
   });
-  const renderStream = (now: number): void => {
+  const renderStream = (innerWidth: number, now: number): void => {
     streamText.content = cachedRows.length
-      ? joinLines(cachedRows.map((r) => activityLine(r, streamInner().w, now)))
+      ? joinLines(cachedRows.map((r) => activityLine(r, innerWidth, now)))
       : new StyledText([dim("(no activity yet)")]);
   };
 
@@ -538,8 +543,9 @@ export async function runTui(): Promise<void> {
 
     // center: activity stream (newest first), auto-filling the pane — read and
     // cache the rows, then render them with the current `now`.
-    cachedRows = recentActivity(streamInner().h);
-    renderStream(now);
+    const inner = streamInner();
+    cachedRows = recentActivity(inner.h);
+    renderStream(inner.w, now);
 
     // bottom-left: plan usage, scoped to the active provider. A provider that
     // does not capture plan usage (e.g. codex) collapses the block so the right
@@ -593,8 +599,7 @@ export async function runTui(): Promise<void> {
     const nextId = providerIds[(i + 1) % providerIds.length] as ProviderId;
     const first = getProvider(nextId).models()[0];
     if (!first) return;
-    const effort: Effort = first.efforts.includes(sel.effort) ? sel.effort : (first.efforts[0] ?? "medium");
-    commit({ provider: nextId, model: first.id, effort });
+    commit({ provider: nextId, model: first.id, effort: preserveEffort(first.efforts, sel.effort) });
   };
 
   const cycleModel = (): void => {
@@ -602,8 +607,7 @@ export async function runTui(): Promise<void> {
     const i = models.findIndex((m) => m.id === sel.model);
     const next = models[(i + 1) % models.length];
     if (!next) return;
-    const effort: Effort = next.efforts.includes(sel.effort) ? sel.effort : (next.efforts[0] ?? "medium");
-    commit({ ...sel, model: next.id, effort });
+    commit({ ...sel, model: next.id, effort: preserveEffort(next.efforts, sel.effort) });
   };
 
   const cycleEffort = (): void => {
@@ -664,7 +668,7 @@ export async function runTui(): Promise<void> {
   // something is actually pending — so a quiet panel does no work.
   renderTimer = setInterval(() => {
     if (!cachedRows.some((r) => r.status === "pending")) return;
-    renderStream(Date.now());
+    renderStream(streamInner().w, Date.now());
     renderer.requestRender();
   }, RENDER_TICK_MS);
   // Auth refresh runs on a slower, decoupled cadence so authStatus() is not

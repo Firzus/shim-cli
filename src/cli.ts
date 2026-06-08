@@ -103,7 +103,7 @@ Commands:
 Env:
   PORT                        Local HTTP port (default 8787)
   MAX_CONCURRENCY             Max concurrent upstream requests (default 20)
-  DEBUG_LOG                       Set to 1 for verbose SSE/tunnel logs
+  DEBUG_LOG                   Set to 1 for verbose SSE/tunnel logs
   CLOUDFLARE_TUNNEL_TOKEN     Named Cloudflare tunnel token (required for Cursor)
   CLOUDFLARE_TUNNEL_HOSTNAME  Public hostname for the named tunnel`);
 }

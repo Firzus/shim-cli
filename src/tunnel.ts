@@ -102,9 +102,7 @@ export async function openTunnel(): Promise<TunnelHandle> {
   }
 
   return {
-    get url() {
-      return url;
-    },
+    url,
     get connected() {
       return connected;
     },
