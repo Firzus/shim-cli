@@ -26,6 +26,7 @@ export async function dispatchChat(
   let promptTokens: number | undefined;
   let completionTokens: number | undefined;
   let cachedTokens: number | undefined;
+  let cacheCreationTokens: number | undefined;
   const ctx: ChatContext = {
     selection,
     body,
@@ -35,6 +36,7 @@ export async function dispatchChat(
       if (u.promptTokens !== undefined) promptTokens = u.promptTokens;
       if (u.completionTokens !== undefined) completionTokens = u.completionTokens;
       if (u.cachedTokens !== undefined) cachedTokens = u.cachedTokens;
+      if (u.cacheCreationTokens !== undefined) cacheCreationTokens = u.cacheCreationTokens;
     },
   };
 
@@ -44,6 +46,7 @@ export async function dispatchChat(
       promptTokens,
       completionTokens,
       cachedTokens,
+      cacheCreationTokens,
       durationMs: Date.now() - startedAt,
       note,
     });

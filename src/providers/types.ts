@@ -53,7 +53,12 @@ export interface ChatContext {
   /** Aborted when the client disconnects. */
   signal: AbortSignal;
   /** Provider reports token usage here for activity logging (may be called once at end). */
-  report(usage: { promptTokens?: number; completionTokens?: number; cachedTokens?: number }): void;
+  report(usage: {
+    promptTokens?: number;
+    completionTokens?: number;
+    cachedTokens?: number;
+    cacheCreationTokens?: number;
+  }): void;
 }
 
 export interface Provider {

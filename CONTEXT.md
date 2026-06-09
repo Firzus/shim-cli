@@ -22,6 +22,12 @@ The ratio `cached_tokens / prompt_tokens` over the **last N requests** (a reques
 - Use: "cache rate", "live cache rate".
 - Avoid: "hit rate", "cache ratio", "windowed cache rate" (the cache rate is request-count scoped; only the counters are time-windowed).
 
+### Cold cache write
+A turn that *writes* the prompt cache rather than reading it: Anthropic reports `cache_creation_input_tokens` (persisted as the activity column `cache_creation`), distinct from the `cache_read_input_tokens` of a warm read. Both inflate `prompt_tokens`, so a cold write is otherwise indistinguishable from a legitimately large prompt and dips the live [[cache-rate]] with no visible cause — the TUI surfaces it as a `wrote N` witness on the activity row to make the dip legible. `cache_creation` is shown **alongside** the cache rate, never folded into it: the rate stays `cache_read / prompt_tokens` per ADR-0003.
+
+- Use: "cold cache write", "cache creation", "wrote witness".
+- Avoid: "cache miss" (a cold write populates the cache; it is not a wasted read), folding creation into the cache rate.
+
 ### Plan usage
 Real subscription-quota consumption, read from Anthropic's `anthropic-ratelimit-unified-{5h,7d}-*` response headers (not self-computed): two windows, **5h** and **weekly**, each with a `utilization` percent and a reset time. The authoritative "how much of my plan have I burned" signal; caching shows up here as slower utilization growth.
 

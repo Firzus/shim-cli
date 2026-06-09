@@ -111,6 +111,33 @@ test("formatActivityTokens omits the cached segment when there are no cache read
   ).toBe(" 500→200tok");
 });
 
+test("formatActivityTokens shows a 'wrote' witness on a cold-write turn, distinct from a large prompt", () => {
+  // Cold write: big prompt, but the giveaway is cache_creation, not cached reads.
+  expect(
+    formatActivityTokens({ prompt_tokens: 12000, completion_tokens: 200, cached_tokens: 0, cache_creation: 11500 }),
+  ).toBe(" 12000→200tok (wrote 11.5k)");
+  // A legitimately large prompt with no cache activity shows no witness at all.
+  expect(
+    formatActivityTokens({ prompt_tokens: 12000, completion_tokens: 200, cached_tokens: 0, cache_creation: 0 }),
+  ).toBe(" 12000→200tok");
+});
+
+test("formatActivityTokens shows cached and wrote together when both landed", () => {
+  expect(
+    formatActivityTokens({ prompt_tokens: 12000, completion_tokens: 200, cached_tokens: 8000, cache_creation: 3500 }),
+  ).toBe(" 12000→200tok (cached 8k, wrote 3.5k)");
+});
+
+test("formatActivityTokens omits the wrote segment when cache_creation is 0, null, or absent", () => {
+  expect(
+    formatActivityTokens({ prompt_tokens: 500, completion_tokens: 200, cached_tokens: 0, cache_creation: null }),
+  ).toBe(" 500→200tok");
+  // Absent field (older row shape) behaves like null.
+  expect(
+    formatActivityTokens({ prompt_tokens: 500, completion_tokens: 200, cached_tokens: 0 }),
+  ).toBe(" 500→200tok");
+});
+
 test("formatActivityTokens renders unknown counts as ? but still shows cached", () => {
   expect(
     formatActivityTokens({ prompt_tokens: null, completion_tokens: 200, cached_tokens: 300 }),
@@ -225,6 +252,7 @@ const baseRow = {
   prompt_tokens: 12000 as number | null,
   completion_tokens: 200 as number | null,
   cached_tokens: 11500 as number | null,
+  cache_creation: null as number | null,
 };
 
 test("spinnerFrame is a deterministic function of now and wraps over the frames", () => {

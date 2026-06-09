@@ -31,6 +31,7 @@ export function getDb(): Database {
       prompt_tokens     INTEGER,
       completion_tokens INTEGER,
       cached_tokens     INTEGER,
+      cache_creation    INTEGER,
       duration_ms       INTEGER,
       note              TEXT
     );
@@ -62,5 +63,10 @@ function migrateActivityColumns(d: Database): void {
   );
   if (!existing.has("cached_tokens")) {
     d.exec("ALTER TABLE activity ADD COLUMN cached_tokens INTEGER;");
+  }
+  // `cache_creation` (cold cache write) lands separately from `cached_tokens`
+  // (cache read); existing rows keep NULL = unmeasured. See issue #27.
+  if (!existing.has("cache_creation")) {
+    d.exec("ALTER TABLE activity ADD COLUMN cache_creation INTEGER;");
   }
 }

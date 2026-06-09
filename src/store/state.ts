@@ -80,6 +80,7 @@ export interface ActivityRow {
   prompt_tokens: number | null;
   completion_tokens: number | null;
   cached_tokens: number | null;
+  cache_creation: number | null;
   duration_ms: number | null;
   note: string | null;
 }
@@ -114,6 +115,7 @@ export function finishActivity(
     promptTokens?: number;
     completionTokens?: number;
     cachedTokens?: number;
+    cacheCreationTokens?: number;
     durationMs?: number;
     note?: string;
   },
@@ -121,7 +123,8 @@ export function finishActivity(
   getDb()
     .query(
       `UPDATE activity SET status = $status, prompt_tokens = $pt, completion_tokens = $ct,
-         cached_tokens = $cached, duration_ms = $dur, note = $note WHERE id = $id`,
+         cached_tokens = $cached, cache_creation = $creation, duration_ms = $dur, note = $note
+         WHERE id = $id`,
     )
     .run({
       $id: id,
@@ -129,6 +132,7 @@ export function finishActivity(
       $pt: outcome.promptTokens ?? null,
       $ct: outcome.completionTokens ?? null,
       $cached: outcome.cachedTokens ?? null,
+      $creation: outcome.cacheCreationTokens ?? null,
       $dur: outcome.durationMs ?? null,
       $note: outcome.note ?? null,
     });

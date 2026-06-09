@@ -120,7 +120,14 @@ function extractText(content: unknown): string {
 
 export interface StreamOptions {
   model: string;
-  report?: (usage: { promptTokens?: number; completionTokens?: number; cachedTokens?: number }) => void;
+  // `cacheCreationTokens` is in the shared shape but never set here: the
+  // Responses API has no cold-cache-write counter (only `cached_tokens` reads).
+  report?: (usage: {
+    promptTokens?: number;
+    completionTokens?: number;
+    cachedTokens?: number;
+    cacheCreationTokens?: number;
+  }) => void;
 }
 
 interface ChatUsage {

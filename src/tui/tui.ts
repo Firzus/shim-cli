@@ -46,25 +46,33 @@ export function abbreviateCount(n: number): string {
 
 /**
  * The per-request token segment for an activity row: `pt→ct` plus a
- * `(cached X)` witness when cache reads landed on that request — the
- * per-request proof the breakpoints work, independent of the aggregate rate.
- * Empty when no token counts were recorded (e.g. a pending row); the cached
- * segment is omitted when there are no cache reads, to avoid `cached 0` noise.
- * Pure (no color) — prior art: formatCacheRate.
+ * parenthesised cache witness — `cached X` when cache reads landed (the
+ * per-request proof the breakpoints work), and `wrote Y` when the turn paid a
+ * cold cache *write* (`cache_creation`). The `wrote` witness is what tells a
+ * cold-write turn apart from a legitimately large prompt: both inflate
+ * `prompt_tokens`, but only the cold write shows `wrote Y`. Both segments can
+ * appear together (`cached X, wrote Y`). Each is omitted when its count is 0 or
+ * unmeasured, to avoid `cached 0` / `wrote 0` noise. Empty when no token counts
+ * were recorded (e.g. a pending row). Pure (no color) — prior art: formatCacheRate.
  */
 export function formatActivityTokens(row: {
   prompt_tokens: number | null;
   completion_tokens: number | null;
   cached_tokens: number | null;
+  cache_creation?: number | null;
 }): string {
   if (row.prompt_tokens == null && row.completion_tokens == null) return "";
   const pt = row.prompt_tokens ?? "?";
   const ct = row.completion_tokens ?? "?";
-  const cached =
-    row.cached_tokens != null && row.cached_tokens > 0
-      ? ` (cached ${abbreviateCount(row.cached_tokens)})`
-      : "";
-  return ` ${pt}→${ct}tok${cached}`;
+  const parts: string[] = [];
+  if (row.cached_tokens != null && row.cached_tokens > 0) {
+    parts.push(`cached ${abbreviateCount(row.cached_tokens)}`);
+  }
+  if (row.cache_creation != null && row.cache_creation > 0) {
+    parts.push(`wrote ${abbreviateCount(row.cache_creation)}`);
+  }
+  const witness = parts.length ? ` (${parts.join(", ")})` : "";
+  return ` ${pt}→${ct}tok${witness}`;
 }
 
 export type UsageLevel = "ok" | "warn" | "crit";
@@ -256,6 +264,7 @@ interface ActivityRowInput {
   prompt_tokens: number | null;
   completion_tokens: number | null;
   cached_tokens: number | null;
+  cache_creation: number | null;
 }
 
 /**
