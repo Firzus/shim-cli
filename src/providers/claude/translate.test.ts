@@ -56,11 +56,17 @@ test("injects the Claude Code identity as the first system block, Cursor's syste
   expect(out.messages[0]).toEqual({ role: "user", content: [{ type: "text", text: "hi" }] });
 });
 
+test("the cache breakpoint carries the configured TTL, defaulting to 1h (issue #28)", () => {
+  // CACHE_TTL defaults to "1h" with no env override; all breakpoints inherit it
+  // from this single marker, so asserting the marker pins the whole request.
+  expect(CACHE_CONTROL).toEqual({ type: "ephemeral", ttl: "1h" });
+});
+
 test("maps effort to adaptive thinking + output_config.effort, clamping 'extra' per model", () => {
   const body = { messages: [{ role: "user", content: "hi" }] };
 
   const sonnetHigh = buildAnthropicRequest(body, { model: "claude-sonnet-4-6", effort: "high" });
-  expect(sonnetHigh.thinking).toEqual({ type: "adaptive" });
+  expect(sonnetHigh.thinking).toEqual({ type: "adaptive", display: "summarized" });
   expect(sonnetHigh.output_config).toEqual({ effort: "high" });
 
   // 'extra' clamps differently: opus accepts xhigh, sonnet rejects xhigh but accepts max.
@@ -330,7 +336,7 @@ test("translates tool_use content blocks to OpenAI tool_calls with fragmented ar
 });
 
 test("emits a final usage chunk from Anthropic input/output tokens and reports usage", async () => {
-  let reported: { promptTokens?: number; completionTokens?: number; cachedTokens?: number } | undefined;
+  let reported: { promptTokens?: number; completionTokens?: number; cachedTokens?: number; cacheCreationTokens?: number } | undefined;
   const upstream = anthropicSSE([
     { event: "message_start", data: { type: "message_start", message: { id: "m", usage: { input_tokens: 42, output_tokens: 1 } } } },
     { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } },
@@ -344,11 +350,11 @@ test("emits a final usage chunk from Anthropic input/output tokens and reports u
   );
   const usageChunk = chunks.find((c) => c.usage);
   expect(usageChunk?.usage).toEqual({ prompt_tokens: 42, completion_tokens: 17, total_tokens: 59 });
-  expect(reported).toEqual({ promptTokens: 42, completionTokens: 17, cachedTokens: 0 });
+  expect(reported).toEqual({ promptTokens: 42, completionTokens: 17, cachedTokens: 0, cacheCreationTokens: 0 });
 });
 
 test("normalizes the prompt total to include cache for both the Cursor chunk and the store report", async () => {
-  let reported: { promptTokens?: number; completionTokens?: number; cachedTokens?: number } | undefined;
+  let reported: { promptTokens?: number; completionTokens?: number; cachedTokens?: number; cacheCreationTokens?: number } | undefined;
   const upstream = anthropicSSE([
     {
       event: "message_start",
@@ -378,6 +384,7 @@ test("normalizes the prompt total to include cache for both the Cursor chunk and
   // prompt total = input + cache_read + cache_creation = 150.
   const usageChunk = chunks.find((c) => c.usage);
   expect(usageChunk?.usage).toEqual({ prompt_tokens: 150, completion_tokens: 17, total_tokens: 167 });
-  // The store report uses the same normalized prompt total.
-  expect(reported).toEqual({ promptTokens: 150, completionTokens: 17, cachedTokens: 100 });
+  // The store report uses the same normalized prompt total, and surfaces the
+  // cold-write count (cache_creation) separately from the cache reads.
+  expect(reported).toEqual({ promptTokens: 150, completionTokens: 17, cachedTokens: 100, cacheCreationTokens: 8 });
 });

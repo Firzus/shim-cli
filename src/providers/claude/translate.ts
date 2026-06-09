@@ -1,4 +1,5 @@
 import type { Effort } from "../types.ts";
+import { CACHE_TTL } from "../../config.ts";
 import { chatChunk, newCompletionId, sse, SSE_DONE } from "../../openai.ts";
 
 /**
@@ -13,10 +14,12 @@ export const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official C
 export const DEFAULT_MAX_TOKENS = 64000;
 
 /**
- * 5-minute (ephemeral) prompt-cache breakpoint. Anthropic caching is opt-in:
- * a block only caches if it carries this marker. See ADR-0001.
+ * Prompt-cache breakpoint marker. Anthropic caching is opt-in: a block only
+ * caches if it carries this marker. The TTL (`1h` extended, or `5m` ephemeral)
+ * is read once from `CACHE_TTL` so all four breakpoints inherit the same value
+ * from a single source. See ADR-0001 and issue #28.
  */
-export const CACHE_CONTROL = { type: "ephemeral" } as const;
+export const CACHE_CONTROL = { type: "ephemeral", ttl: CACHE_TTL } as const;
 
 export interface ClaudeOptions {
   model: string;
@@ -175,8 +178,11 @@ function mapTools(tools: unknown): Array<Record<string, unknown>> | undefined {
 export function mapThinking(
   model: string,
   effort: Effort,
-): { thinking: { type: "adaptive" }; output_config: { effort: string } } {
-  return { thinking: { type: "adaptive" }, output_config: { effort: mapEffort(model, effort) } };
+): { thinking: { type: "adaptive"; display: "summarized" }; output_config: { effort: string } } {
+  return {
+    thinking: { type: "adaptive", display: "summarized" },
+    output_config: { effort: mapEffort(model, effort) },
+  };
 }
 
 function mapEffort(model: string, effort: Effort): string {
@@ -210,7 +216,12 @@ function extractText(content: unknown): string {
 
 export interface StreamOptions {
   model: string;
-  report?: (usage: { promptTokens?: number; completionTokens?: number; cachedTokens?: number }) => void;
+  report?: (usage: {
+    promptTokens?: number;
+    completionTokens?: number;
+    cachedTokens?: number;
+    cacheCreationTokens?: number;
+  }) => void;
 }
 
 export function anthropicStreamToOpenAI(
@@ -323,6 +334,7 @@ export function anthropicStreamToOpenAI(
           promptTokens,
           completionTokens: outputTokens,
           cachedTokens: cacheReadTokens,
+          cacheCreationTokens: cacheCreationTokens,
         });
         controller.enqueue(enc.encode(SSE_DONE));
         controller.close();
