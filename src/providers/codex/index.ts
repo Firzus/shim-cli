@@ -1,7 +1,6 @@
 import { ulid } from "ulid";
 import type { ChatContext, Provider, ProviderModel } from "../types.ts";
-import { ProviderError } from "../types.ts";
-import { safeResponseText } from "../../http.ts";
+import { fetchWithAuthRetry, upstreamBodyOrThrow } from "../shared.ts";
 import { buildResponsesRequest, responsesStreamToOpenAI } from "./translate.ts";
 import { callCodex } from "./upstream.ts";
 import { authStatus, getAuth, invalidateAuthCache } from "./auth.ts";
@@ -37,26 +36,12 @@ export const codexProvider: Provider = {
     });
     const sessionId = ulid().toLowerCase();
 
-    let auth = await getAuth();
-    const call = (a: typeof auth) =>
-      callCodex(body, { accessToken: a.accessToken, accountId: a.chatgptAccountId }, sessionId, ctx.signal);
+    const res = await fetchWithAuthRetry(getAuth, invalidateAuthCache, (auth) =>
+      callCodex(body, { accessToken: auth.accessToken, accountId: auth.chatgptAccountId }, sessionId, ctx.signal),
+    );
+    const upstreamBody = await upstreamBodyOrThrow(res, "Codex");
 
-    let res = await call(auth);
-    if (res.status === 401) {
-      await res.body?.cancel().catch(() => {});
-      invalidateAuthCache();
-      auth = await getAuth(true);
-      res = await call(auth);
-    }
-
-    if (!res.ok || !res.body) {
-      const text = res.body
-        ? await safeResponseText(res, { limit: 500, fallback: "<unreadable>" })
-        : "<no body>";
-      throw new ProviderError(`Codex ${res.status}: ${text}`, res.status, text);
-    }
-
-    return responsesStreamToOpenAI(res.body, {
+    return responsesStreamToOpenAI(upstreamBody, {
       model: ctx.selection.model,
       report: ctx.report,
     });

@@ -1,6 +1,5 @@
 import type { ChatContext, Provider, ProviderModel } from "../types.ts";
-import { ProviderError } from "../types.ts";
-import { safeResponseText } from "../../http.ts";
+import { fetchWithAuthRetry, upstreamBodyOrThrow } from "../shared.ts";
 import { anthropicStreamToOpenAI, buildAnthropicRequest } from "./translate.ts";
 import { callClaude } from "./upstream.ts";
 import { authStatus, getAuth, invalidateAuthCache } from "./auth.ts";
@@ -40,21 +39,10 @@ export const claudeProvider: Provider = {
     });
     body.stream = true;
 
-    let claims = await getAuth();
-    let res = await callClaude(body, claims.accessToken, ctx.signal);
-    if (res.status === 401) {
-      await res.body?.cancel().catch(() => {});
-      invalidateAuthCache();
-      claims = await getAuth(true);
-      res = await callClaude(body, claims.accessToken, ctx.signal);
-    }
-
-    if (!res.ok || !res.body) {
-      const text = res.body
-        ? await safeResponseText(res, { limit: 500, fallback: "<unreadable>" })
-        : "<no body>";
-      throw new ProviderError(`Anthropic ${res.status}: ${text}`, res.status, text);
-    }
+    const res = await fetchWithAuthRetry(getAuth, invalidateAuthCache, (claims) =>
+      callClaude(body, claims.accessToken, ctx.signal),
+    );
+    const upstreamBody = await upstreamBodyOrThrow(res, "Anthropic");
 
     // Capture plan usage from headers (separate from the body stream, so this
     // never affects what Cursor receives). Parsing is cheap and inline; the
@@ -75,7 +63,7 @@ export const claudeProvider: Provider = {
       // ignore — header parsing is best-effort
     }
 
-    return anthropicStreamToOpenAI(res.body, {
+    return anthropicStreamToOpenAI(upstreamBody, {
       model: ctx.selection.model,
       report: ctx.report,
     });
