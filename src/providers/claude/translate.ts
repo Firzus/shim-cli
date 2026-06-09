@@ -298,9 +298,14 @@ export function anthropicStreamToOpenAI(
           }
         }
         emit({}, finishReason ?? "stop");
-        // The chunk streamed to Cursor keeps Anthropic's raw `input_tokens`
-        // (cache excluded). Only the value reported to the store is normalized
-        // to the full input so the session cache rate is coherent.
+        // OpenAI semantics: `prompt_tokens` is the full input, cached tokens
+        // included (the detail lives in `prompt_tokens_details.cached_tokens`).
+        // Anthropic splits these out (`input_tokens` excludes cache), so we
+        // re-add cache read + creation to get the true context size. Cursor's
+        // Context Usage reads this; sending raw `input_tokens` under-counts the
+        // window. The store report uses the same value so the cache rate stays
+        // coherent.
+        const promptTokens = inputTokens + cacheReadTokens + cacheCreationTokens;
         const usageChunk = {
           id,
           object: "chat.completion.chunk",
@@ -308,14 +313,14 @@ export function anthropicStreamToOpenAI(
           model: opts.model,
           choices: [],
           usage: {
-            prompt_tokens: inputTokens,
+            prompt_tokens: promptTokens,
             completion_tokens: outputTokens,
-            total_tokens: inputTokens + outputTokens,
+            total_tokens: promptTokens + outputTokens,
           },
         };
         controller.enqueue(enc.encode(sse(usageChunk)));
         opts.report?.({
-          promptTokens: inputTokens + cacheReadTokens + cacheCreationTokens,
+          promptTokens,
           completionTokens: outputTokens,
           cachedTokens: cacheReadTokens,
         });

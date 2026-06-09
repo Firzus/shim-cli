@@ -347,7 +347,7 @@ test("emits a final usage chunk from Anthropic input/output tokens and reports u
   expect(reported).toEqual({ promptTokens: 42, completionTokens: 17, cachedTokens: 0 });
 });
 
-test("normalizes the reported prompt total to include cache, but keeps the Cursor-facing chunk's raw input_tokens", async () => {
+test("normalizes the prompt total to include cache for both the Cursor chunk and the store report", async () => {
   let reported: { promptTokens?: number; completionTokens?: number; cachedTokens?: number } | undefined;
   const upstream = anthropicSSE([
     {
@@ -374,9 +374,10 @@ test("normalizes the reported prompt total to include cache, but keeps the Curso
   const chunks = parseOpenAIChunks(
     await collectText(anthropicStreamToOpenAI(upstream, { model: "claude-sonnet-4-6", report: (u) => { reported = u; } })),
   );
-  // The chunk streamed to Cursor must keep the raw input_tokens (cache excluded).
+  // The chunk streamed to Cursor uses the full input (OpenAI semantics):
+  // prompt total = input + cache_read + cache_creation = 150.
   const usageChunk = chunks.find((c) => c.usage);
-  expect(usageChunk?.usage).toEqual({ prompt_tokens: 42, completion_tokens: 17, total_tokens: 59 });
-  // The store report normalizes prompt total = input + cache_read + cache_creation.
+  expect(usageChunk?.usage).toEqual({ prompt_tokens: 150, completion_tokens: 17, total_tokens: 167 });
+  // The store report uses the same normalized prompt total.
   expect(reported).toEqual({ promptTokens: 150, completionTokens: 17, cachedTokens: 100 });
 });
