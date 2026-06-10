@@ -16,7 +16,7 @@ import {
 import { PORT, TUNNEL_HOSTNAME } from "../config.ts";
 import { allProviders, getProvider } from "../providers/registry.ts";
 import {
-  CACHE_RATE_SAMPLE,
+  bucketedCacheSamples,
   type CacheSample,
   DEFAULT_PERIOD,
   getPlanUsage,
@@ -27,7 +27,6 @@ import {
   periodSince,
   type PlanWindow,
   recentActivity,
-  recentCacheSamples,
   setSelection,
   windowedCounters,
 } from "../store/state.ts";
@@ -155,7 +154,7 @@ const SPARK_GLYPHS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as
 
 /**
  * Map a sequence of 0–1 rates to block glyphs, one per rate in order — the
- * shape of the recent cache behaviour, where a cold cache write reads as a
+ * shape of the cache behaviour over time, where a cold stretch reads as a
  * visible trough. Rates are clamped into the glyph scale. Pure.
  */
 export function sparkline(rates: readonly number[]): string {
@@ -169,28 +168,28 @@ export function sparkline(rates: readonly number[]): string {
 
 /** The cache-rate line, split so the mount can colour each part by its role. */
 export interface CacheRateView {
-  /** `cache rate (last N)` — dim. */
+  /** `cache rate (all)` — dim. */
   label: string;
-  /** One glyph per measured request, oldest → newest; "" on an empty sample. */
+  /** One glyph per history bucket, oldest → newest; "" with no measured rows. */
   spark: string;
-  /** Aggregate percent (or the dash form when the sample is empty) — value brightness. */
+  /** All-time aggregate percent (0% with no measured rows) — value brightness. */
   value: string;
-  /** `1.2k cached / 2.7k input`, or "" on an empty sample — dim. */
+  /** `1.2k cached / 2.7k input`, or "" with no measured rows — dim. */
   detail: string;
 }
 
 /**
- * Derive the cache-rate line from the per-request samples (oldest → newest).
- * Both the per-request sparkline and the aggregate percent come from the same
- * sample, so the two can never disagree; per ADR-0003 the aggregate stays
- * `Σcached / Σinput` over the request-count window and cache creation is never
- * folded in. An empty sample renders the dash form. Pure.
+ * Derive the cache-rate line from the bucketed history samples (oldest →
+ * newest). Both the bucketed sparkline and the aggregate percent come from the
+ * same samples, so the two can never disagree; per ADR-0004 the aggregate is
+ * `Σcached / Σinput` over the whole measured history and cache creation is
+ * never folded in. No measured rows renders 0%. Pure.
  */
-export function cacheRateView(samples: readonly CacheSample[], sample: number): CacheRateView {
-  const label = `cache rate (last ${sample})`;
+export function cacheRateView(samples: readonly CacheSample[]): CacheRateView {
+  const label = "cache rate (all)";
   const cached = samples.reduce((sum, s) => sum + s.cached, 0);
   const input = samples.reduce((sum, s) => sum + s.input, 0);
-  if (input <= 0) return { label, spark: "", value: "—", detail: "" };
+  if (input <= 0) return { label, spark: "", value: "0%", detail: "" };
   return {
     label,
     spark: sparkline(samples.map((s) => (s.input > 0 ? s.cached / s.input : 0))),
@@ -1079,10 +1078,9 @@ export async function runTui(): Promise<void> {
       }
     }
 
-    // bottom-right: traffic — cache rate (per-request sparkline + aggregate,
-    // both derived from the same recent sample) and the windowed counters.
-    const samples = recentCacheSamples(CACHE_RATE_SAMPLE);
-    const rate = cacheRateView(samples, CACHE_RATE_SAMPLE);
+    // bottom-right: traffic — cache rate (bucketed all-time sparkline +
+    // aggregate, both derived from the same SQL read) and the windowed counters.
+    const rate = cacheRateView(bucketedCacheSamples());
     const rateChunks: TextChunk[] = [dim(`${rate.label}  `)];
     if (rate.spark) rateChunks.push(value(rate.spark), value("  "));
     rateChunks.push(value(rate.value));

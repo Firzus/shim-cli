@@ -4,7 +4,9 @@ Date: 2026-06-09
 
 ## Status
 
-Accepted. Supersedes the cache-rate windowing decision in
+Superseded by [ADR-0004](./0004-cache-rate-all-time.md) (the cache rate is now
+all-time; the NULL-exclusion, `id` ordering, and never-fold-creation decisions
+below remain in force). Superseded the cache-rate windowing decision in
 [ADR-0002](./0002-usage-metrics-model.md) (the request/error **counters** keep
 the time-windowed `w` period; only the cache rate moves).
 

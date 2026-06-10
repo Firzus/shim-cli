@@ -196,36 +196,29 @@ test("sparkline clamps out-of-range rates into the glyph scale", () => {
   expect(sparkline([])).toBe("");
 });
 
-test("cacheRateView derives sparkline and aggregate from the same sample", () => {
-  const view = cacheRateView(
-    [
-      { cached: 0, input: 100 }, // the cold cache write: a visible trough
-      { cached: 90, input: 100 },
-      { cached: 80, input: 100 },
-    ],
-    20,
-  );
-  expect(view.label).toBe("cache rate (last 20)");
+test("cacheRateView derives sparkline and aggregate from the same buckets", () => {
+  const view = cacheRateView([
+    { cached: 0, input: 100 }, // a cold stretch: a visible trough
+    { cached: 90, input: 100 },
+    { cached: 80, input: 100 },
+  ]);
+  expect(view.label).toBe("cache rate (all)");
   expect(view.spark).toBe(sparkline([0, 0.9, 0.8]));
-  expect(view.value).toBe("57%"); // 170 / 300, aggregate over the same rows
+  expect(view.value).toBe("57%"); // 170 / 300, aggregate over the same buckets
   expect(view.detail).toBe("170 cached / 300 input");
 });
 
 test("cacheRateView abbreviates the detail counts like the rest of the panel", () => {
-  const view = cacheRateView([{ cached: 1200, input: 2700 }], 20);
+  const view = cacheRateView([{ cached: 1200, input: 2700 }]);
   expect(view.value).toBe("44%");
   expect(view.detail).toBe("1.2k cached / 2.7k input");
 });
 
-test("cacheRateView surfaces the sample size in the label", () => {
-  expect(cacheRateView([{ cached: 1, input: 2 }], 50).label).toBe("cache rate (last 50)");
-});
-
-test("cacheRateView renders the dash form on an empty sample", () => {
-  expect(cacheRateView([], 20)).toEqual({
-    label: "cache rate (last 20)",
+test("cacheRateView renders 0% with no measured rows", () => {
+  expect(cacheRateView([])).toEqual({
+    label: "cache rate (all)",
     spark: "",
-    value: "—",
+    value: "0%",
     detail: "",
   });
 });

@@ -10,12 +10,10 @@ export type Period = (typeof PERIODS)[number];
 export const DEFAULT_PERIOD: Period = "24h";
 
 /**
- * Cache rate is scoped to the last N *measured* requests, not a time window. One
- * Cursor response is a burst of proxy requests, so a request-count window
- * converges within a single response and never lingers behind stale history the
- * way a time window does. See ADR-0003.
+ * Fixed glyph count of the cache-rate sparkline: the whole measured history is
+ * bucketed into this many equal-size buckets, one glyph per bucket. See ADR-0004.
  */
-export const CACHE_RATE_SAMPLE = 20;
+export const CACHE_SPARK_BUCKETS = 20;
 
 const PERIOD_MS: Record<Exclude<Period, "all">, number> = {
   "5h": 5 * 60 * 60 * 1000,
@@ -144,38 +142,47 @@ export function recentActivity(limit = 50): ActivityRow[] {
     .all({ $limit: limit }) as ActivityRow[];
 }
 
-/** One measured request's cache sample: its cached + prompt token counts. */
+/** One sparkline bucket's cache sample: its summed cached + prompt token counts. */
 export interface CacheSample {
   cached: number;
   input: number;
 }
 
 /**
- * Per-request cache samples over the last `n` **measured** requests, returned
- * oldest → newest. A row is measured only when both token columns are present;
- * a NULL in either is *unmeasured* — a pending request, or one recorded by an
- * older build that never reported cache tokens — and is excluded outright, not
- * counted as a 0% miss that would drag the rate down. This is the single store
- * read behind the cache rate: the TUI derives both the aggregate rate
- * (`Σcached / Σinput`) and the per-request sparkline from the same sample, so
- * the two can never disagree. `db` is injectable for tests. See ADR-0003.
+ * The whole measured history, bucketed into at most `buckets` equal-size
+ * buckets (NTILE over insertion order), returned oldest → newest — one row per
+ * bucket, each carrying that bucket's summed token counts. A row is measured
+ * only when both token columns are present; a NULL in either is *unmeasured* —
+ * a pending request, or one recorded by an older build that never reported
+ * cache tokens — and is excluded outright, not counted as a 0% miss that would
+ * drag the rate down. This is the single store read behind the cache rate: the
+ * TUI derives both the all-time aggregate rate (`Σcached / Σinput` — bucket
+ * sums add up to the exact table-wide totals) and the bucketed sparkline from
+ * the same result, so the two can never disagree. Aggregation happens in SQL —
+ * the table grows unbounded and the TUI polls frequently, so the rows never
+ * cross into JS. `db` is injectable for tests. See ADR-0004.
  */
-export function recentCacheSamples(n = CACHE_RATE_SAMPLE, db: Database = getDb()): CacheSample[] {
-  const rows = db
+export function bucketedCacheSamples(
+  buckets = CACHE_SPARK_BUCKETS,
+  db: Database = getDb(),
+): CacheSample[] {
+  return db
     .query(
-      `SELECT cached_tokens AS cached, prompt_tokens AS input FROM activity
-        WHERE cached_tokens IS NOT NULL AND prompt_tokens IS NOT NULL
-        ORDER BY id DESC LIMIT $n`,
+      `SELECT SUM(cached_tokens) AS cached, SUM(prompt_tokens) AS input
+         FROM (SELECT cached_tokens, prompt_tokens,
+                      NTILE($buckets) OVER (ORDER BY id) AS bucket
+                 FROM activity
+                WHERE cached_tokens IS NOT NULL AND prompt_tokens IS NOT NULL)
+        GROUP BY bucket ORDER BY bucket`,
     )
-    .all({ $n: n }) as CacheSample[];
-  return rows.reverse();
+    .all({ $buckets: buckets }) as CacheSample[];
 }
 
 /**
  * Request + error counts over a bounded window — rows with `ts >= since`.
  * `requests` is every row in the window (all statuses); `errors` is the subset
  * with `status = 'error'`. The `w` period scopes these counters only; the cache
- * rate is request-count scoped (see [[recentCacheSamples]]). Pass `since = 0` for
+ * rate is all-time (see [[bucketedCacheSamples]]). Pass `since = 0` for
  * the whole table. `db` is injectable for tests against a temporary database.
  */
 export function windowedCounters(

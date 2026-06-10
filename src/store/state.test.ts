@@ -1,7 +1,8 @@
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
-  CACHE_RATE_SAMPLE,
+  bucketedCacheSamples,
+  CACHE_SPARK_BUCKETS,
   DEFAULT_PERIOD,
   getPlanUsage,
   nextPeriod,
@@ -10,7 +11,6 @@ import {
   type PlanUsageRecord,
   type PlanUsageSnapshot,
   periodSince,
-  recentCacheSamples,
   savePlanUsage,
   shouldPersistUsage,
   windowedCounters,
@@ -48,7 +48,7 @@ test("the default launch period is 24h", () => {
 });
 
 /**
- * Build a throwaway activity table with the columns recentCacheSamples reads.
+ * Build a throwaway activity table with the columns bucketedCacheSamples reads.
  * Rows are inserted in array order, so `id` ascends with the array index —
  * the last array entry is the newest request.
  */
@@ -68,66 +68,70 @@ function seedDb(rows: Array<{ cached: number | null; input: number | null }>): D
   return db;
 }
 
-test("the cache-rate sample is the last 20 requests", () => {
-  expect(CACHE_RATE_SAMPLE).toBe(20);
+test("the cache-rate sparkline is 20 glyphs wide", () => {
+  expect(CACHE_SPARK_BUCKETS).toBe(20);
 });
 
-test("recentCacheSamples returns the last n measured requests, oldest → newest", () => {
+test("bucketedCacheSamples sums the whole history into equal-size buckets, oldest → newest", () => {
+  // 4 measured rows into 2 buckets: [oldest two] then [newest two], each
+  // carrying that bucket's summed tokens — the aggregation runs in SQL.
   const db = seedDb([
-    { cached: 10, input: 100 }, // oldest — outside a 2-request sample
+    { cached: 10, input: 100 }, // oldest
+    { cached: 20, input: 100 },
     { cached: 90, input: 100 },
     { cached: 80, input: 100 }, // newest
   ]);
-  expect(recentCacheSamples(2, db)).toEqual([
-    { cached: 90, input: 100 },
-    { cached: 80, input: 100 },
-  ]); // last two, in insertion order
-  expect(recentCacheSamples(20, db)).toEqual([
-    { cached: 10, input: 100 },
-    { cached: 90, input: 100 },
-    { cached: 80, input: 100 },
-  ]); // all three
+  expect(bucketedCacheSamples(2, db)).toEqual([
+    { cached: 30, input: 200 },
+    { cached: 170, input: 200 },
+  ]);
 });
 
-test("recentCacheSamples excludes unmeasured rows instead of scoring them 0%", () => {
+test("bucketedCacheSamples bucket sums add up to the exact all-time totals", () => {
+  // The TUI derives the aggregate rate from the bucket sums, so they must
+  // reconstruct the table-wide totals regardless of how rows split into buckets.
+  const rows = [11, 23, 35, 47, 59, 61, 73].map((c, i) => ({ cached: c, input: 100 + i }));
+  const db = seedDb(rows);
+  const samples = bucketedCacheSamples(3, db);
+  expect(samples.reduce((s, b) => s + b.cached, 0)).toBe(rows.reduce((s, r) => s + r.cached, 0));
+  expect(samples.reduce((s, b) => s + b.input, 0)).toBe(rows.reduce((s, r) => s + r.input, 0));
+});
+
+test("bucketedCacheSamples returns one bucket per row when rows are fewer than buckets", () => {
+  const db = seedDb([
+    { cached: 10, input: 100 }, // oldest
+    { cached: 90, input: 100 }, // newest
+  ]);
+  expect(bucketedCacheSamples(20, db)).toEqual([
+    { cached: 10, input: 100 },
+    { cached: 90, input: 100 },
+  ]);
+});
+
+test("bucketedCacheSamples excludes unmeasured rows instead of scoring them 0%", () => {
   // A NULL cached_tokens row is unmeasured (pending, or an old build that never
-  // reported) — it must not enter the sample as a 0% miss.
+  // reported) — it must not enter the history as a 0% miss.
   const db = seedDb([
     { cached: 90, input: 100 }, // measured, 90%
     { cached: null, input: 40_000 }, // unmeasured — excluded outright
   ]);
-  expect(recentCacheSamples(20, db)).toEqual([{ cached: 90, input: 100 }]); // 90%, not ~0%
+  expect(bucketedCacheSamples(20, db)).toEqual([{ cached: 90, input: 100 }]); // 90%, not ~0%
 });
 
-test("recentCacheSamples reaches back past newer unmeasured rows", () => {
-  // Newest rows are unmeasured; the sample must still reach back to the measured
-  // ones rather than collapse to empty.
-  const db = seedDb([
-    { cached: 80, input: 100 }, // measured
-    { cached: 70, input: 100 }, // measured
-    { cached: null, input: 40_000 }, // newest, unmeasured
-    { cached: null, input: 40_000 }, // newest, unmeasured
-  ]);
-  expect(recentCacheSamples(2, db)).toEqual([
-    { cached: 80, input: 100 },
-    { cached: 70, input: 100 },
-  ]);
-});
-
-test("recentCacheSamples excludes a row with a NULL prompt_tokens too", () => {
+test("bucketedCacheSamples excludes a row with a NULL prompt_tokens too", () => {
   // A measured cached count but a missing denominator is still unmeasured — it
   // must not contribute a numerator without a matching input.
   const db = seedDb([
     { cached: 90, input: 100 }, // fully measured
     { cached: 50, input: null }, // cached present, input missing — excluded
   ]);
-  expect(recentCacheSamples(20, db)).toEqual([{ cached: 90, input: 100 }]);
+  expect(bucketedCacheSamples(20, db)).toEqual([{ cached: 90, input: 100 }]);
 });
 
-test("recentCacheSamples is empty when no measured rows exist", () => {
+test("bucketedCacheSamples is empty when no measured rows exist", () => {
   const db = seedDb([{ cached: null, input: 100 }]);
-  expect(recentCacheSamples(20, db)).toEqual([]);
-  expect(recentCacheSamples(20, seedDb([]))).toEqual([]);
+  expect(bucketedCacheSamples(20, db)).toEqual([]);
+  expect(bucketedCacheSamples(20, seedDb([]))).toEqual([]);
 });
 
 /** Build a throwaway activity table with the columns the counters reads need. */
