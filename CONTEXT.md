@@ -17,10 +17,10 @@ A cache breakpoint placed on conversation history (as opposed to the stable `sys
 - Avoid: "history cache", "message cache", "pre-warm".
 
 ### Cache rate
-The ratio `SUM(cached_tokens) / SUM(prompt_tokens)` over **all measured requests** in the activity database (all-time, across sessions), shown in the TUI with a sparkline that buckets the whole history into a fixed glyph count. `cached_tokens` is Anthropic's `cache_read_input_tokens`; `prompt_tokens` is the normalized full input (raw input + cache read + cache creation). Only **measured** requests count — a request whose cache tokens were never reported is excluded, not treated as a 0% miss. The aggregation runs in SQL (the table grows unbounded; the TUI polls). It measures cache *efficiency* — distinct from [[plan-usage]], which measures quota *consumption*. Distinct also from the request/error **counters**, which are time-windowed (the `w` period); the cache rate ignores the `w` period.
+The ratio `SUM(cached_tokens) / SUM(prompt_tokens)` over **all measured requests** in the activity database — the whole retained history, bounded by the 7-day [[retention]] — shown in the TUI as a single percent plus a `X cached / Y input` detail (no sparkline, per ADR-0005). `cached_tokens` is Anthropic's `cache_read_input_tokens`; `prompt_tokens` is the normalized full input (raw input + cache read + cache creation). Only **measured** requests count — a request whose cache tokens were never reported is excluded, not treated as a 0% miss. The aggregation runs in SQL (the TUI polls). It measures cache *efficiency* — distinct from [[plan-usage]], which measures quota *consumption*. The request/error **counters** share the same scope (per ADR-0005, the `w` period was removed).
 
-- Use: "cache rate", "all-time cache rate".
-- Avoid: "hit rate", "cache ratio", "live cache rate" (the rate is a long-run figure; the live signal is the per-row `cached`/`wrote` witnesses), "windowed cache rate" (only the counters are time-windowed).
+- Use: "cache rate".
+- Avoid: "hit rate", "cache ratio", "live cache rate" (the rate is a long-run figure; the live signal is the per-row `cached`/`wrote` witnesses), "windowed cache rate" (the panel has no time window; the 7-day bound is retention, not a query window).
 
 ### Cold cache write
 A turn that *writes* the prompt cache rather than reading it: Anthropic reports `cache_creation_input_tokens` (persisted as the activity column `cache_creation`), distinct from the `cache_read_input_tokens` of a warm read. Both inflate `prompt_tokens`, so a cold write is otherwise indistinguishable from a legitimately large prompt and dips the [[cache-rate]] with no visible cause — the TUI surfaces it as a `wrote N` witness on the activity row to make the dip legible. `cache_creation` is shown **alongside** the cache rate, never folded into it: the rate stays `cache_read / prompt_tokens` per ADR-0004.
@@ -33,6 +33,12 @@ Real subscription-quota consumption, read from Anthropic's `anthropic-ratelimit-
 
 - Use: "plan usage".
 - Avoid: "cache rate" (different concept — efficiency vs consumption), "quota meter".
+
+### Retention
+The storage bound on the activity database: rows older than **7 days** are deleted (`purgeExpiredActivity`, run by the service at startup and hourly — the TUI never purges). It bounds what is *stored*, not what is *queried*: the [[cache-rate]] and counter queries stay unwindowed whole-table scans (ADR-0006). Distinct from a UI time window (removed by ADR-0005) and from quota windows ([[plan-usage]]'s 5h/weekly).
+
+- Use: "retention", "7-day retention".
+- Avoid: "time window", "TTL", "history limit".
 
 ### Prefix (cacheable prefix)
 The exact byte sequence from the start of a request up to a cache breakpoint. Anthropic reuses a cache entry only on an exact prefix match against a prior request, so request translation must be deterministic.

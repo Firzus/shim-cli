@@ -1,56 +1,27 @@
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
-  bucketedCacheSamples,
-  CACHE_SPARK_BUCKETS,
-  DEFAULT_PERIOD,
+  type ActivityRow,
+  activityCounters,
+  activityPage,
+  cacheTotals,
   getPlanUsage,
-  nextPeriod,
   pendingCount,
-  type Period,
   type PlanUsageRecord,
   type PlanUsageSnapshot,
-  periodSince,
+  purgeExpiredActivity,
+  RETENTION_MS,
   savePlanUsage,
   shouldPersistUsage,
-  windowedCounters,
+  sweepPendingActivity,
 } from "./state.ts";
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
-test("periodSince maps fixed windows to their epoch lower bound", () => {
-  const now = 1_000_000_000_000;
-  expect(periodSince("5h", now)).toBe(now - 5 * HOUR);
-  expect(periodSince("24h", now)).toBe(now - DAY);
-  expect(periodSince("7d", now)).toBe(now - 7 * DAY);
-  expect(periodSince("30d", now)).toBe(now - 30 * DAY);
-});
-
-test("periodSince maps 'all' to 0 regardless of now", () => {
-  expect(periodSince("all", 1_000_000_000_000)).toBe(0);
-  expect(periodSince("all", 0)).toBe(0);
-});
-
-test("nextPeriod cycles 5h → 24h → 7d → 30d → all → 5h", () => {
-  const order: Period[] = [];
-  let p: Period = "5h";
-  for (let i = 0; i < 5; i++) {
-    order.push(p);
-    p = nextPeriod(p);
-  }
-  expect(order).toEqual(["5h", "24h", "7d", "30d", "all"]);
-  expect(nextPeriod("all")).toBe("5h"); // wraps
-});
-
-test("the default launch period is 24h", () => {
-  expect(DEFAULT_PERIOD).toBe("24h");
-});
-
 /**
- * Build a throwaway activity table with the columns bucketedCacheSamples reads.
- * Rows are inserted in array order, so `id` ascends with the array index —
- * the last array entry is the newest request.
+ * Build a throwaway activity table with the columns cacheTotals reads. Rows are
+ * inserted in array order, so `id` ascends with the array index.
  */
 function seedDb(rows: Array<{ cached: number | null; input: number | null }>): Database {
   const db = new Database(":memory:");
@@ -68,80 +39,48 @@ function seedDb(rows: Array<{ cached: number | null; input: number | null }>): D
   return db;
 }
 
-test("the cache-rate sparkline is 20 glyphs wide", () => {
-  expect(CACHE_SPARK_BUCKETS).toBe(20);
-});
-
-test("bucketedCacheSamples sums the whole history into equal-size buckets, oldest → newest", () => {
-  // 4 measured rows into 2 buckets: [oldest two] then [newest two], each
-  // carrying that bucket's summed tokens — the aggregation runs in SQL.
+test("cacheTotals sums cached and input over all measured rows", () => {
   const db = seedDb([
-    { cached: 10, input: 100 }, // oldest
+    { cached: 10, input: 100 },
     { cached: 20, input: 100 },
     { cached: 90, input: 100 },
-    { cached: 80, input: 100 }, // newest
+    { cached: 80, input: 100 },
   ]);
-  expect(bucketedCacheSamples(2, db)).toEqual([
-    { cached: 30, input: 200 },
-    { cached: 170, input: 200 },
-  ]);
+  expect(cacheTotals(db)).toEqual({ cached: 200, input: 400 });
 });
 
-test("bucketedCacheSamples bucket sums add up to the exact all-time totals", () => {
-  // The TUI derives the aggregate rate from the bucket sums, so they must
-  // reconstruct the table-wide totals regardless of how rows split into buckets.
-  const rows = [11, 23, 35, 47, 59, 61, 73].map((c, i) => ({ cached: c, input: 100 + i }));
-  const db = seedDb(rows);
-  const samples = bucketedCacheSamples(3, db);
-  expect(samples.reduce((s, b) => s + b.cached, 0)).toBe(rows.reduce((s, r) => s + r.cached, 0));
-  expect(samples.reduce((s, b) => s + b.input, 0)).toBe(rows.reduce((s, r) => s + r.input, 0));
-});
-
-test("bucketedCacheSamples returns one bucket per row when rows are fewer than buckets", () => {
+test("cacheTotals excludes unmeasured rows (NULL in either token column)", () => {
   const db = seedDb([
-    { cached: 10, input: 100 }, // oldest
-    { cached: 90, input: 100 }, // newest
+    { cached: 90, input: 100 }, // measured
+    { cached: null, input: 40_000 }, // cached missing — excluded
+    { cached: 50, input: null }, // input missing — excluded
   ]);
-  expect(bucketedCacheSamples(20, db)).toEqual([
-    { cached: 10, input: 100 },
-    { cached: 90, input: 100 },
-  ]);
+  expect(cacheTotals(db)).toEqual({ cached: 90, input: 100 });
 });
 
-test("bucketedCacheSamples excludes unmeasured rows instead of scoring them 0%", () => {
-  // A NULL cached_tokens row is unmeasured (pending, or an old build that never
-  // reported) — it must not enter the history as a 0% miss.
-  const db = seedDb([
-    { cached: 90, input: 100 }, // measured, 90%
-    { cached: null, input: 40_000 }, // unmeasured — excluded outright
-  ]);
-  expect(bucketedCacheSamples(20, db)).toEqual([{ cached: 90, input: 100 }]); // 90%, not ~0%
+test("cacheTotals is zeros when no measured rows exist", () => {
+  expect(cacheTotals(seedDb([{ cached: null, input: 100 }]))).toEqual({ cached: 0, input: 0 });
+  expect(cacheTotals(seedDb([]))).toEqual({ cached: 0, input: 0 });
 });
 
-test("bucketedCacheSamples excludes a row with a NULL prompt_tokens too", () => {
-  // A measured cached count but a missing denominator is still unmeasured — it
-  // must not contribute a numerator without a matching input.
-  const db = seedDb([
-    { cached: 90, input: 100 }, // fully measured
-    { cached: 50, input: null }, // cached present, input missing — excluded
-  ]);
-  expect(bucketedCacheSamples(20, db)).toEqual([{ cached: 90, input: 100 }]);
-});
-
-test("bucketedCacheSamples is empty when no measured rows exist", () => {
-  const db = seedDb([{ cached: null, input: 100 }]);
-  expect(bucketedCacheSamples(20, db)).toEqual([]);
-  expect(bucketedCacheSamples(20, seedDb([]))).toEqual([]);
-});
-
-/** Build a throwaway activity table with the columns the counters reads need. */
+/** Build a throwaway activity table with the columns the page + counters reads need. */
 function seedActivity(rows: Array<{ ts: number; status: string }>): Database {
   const db = new Database(":memory:");
   db.exec(`
     CREATE TABLE activity (
-      id     INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts     INTEGER NOT NULL,
-      status TEXT NOT NULL
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts          INTEGER NOT NULL,
+      request_id  TEXT,
+      provider    TEXT,
+      model       TEXT,
+      effort      TEXT,
+      status      TEXT NOT NULL,
+      prompt_tokens     INTEGER,
+      completion_tokens INTEGER,
+      cached_tokens     INTEGER,
+      cache_creation    INTEGER,
+      duration_ms INTEGER,
+      note        TEXT
     );
   `);
   const insert = db.query("INSERT INTO activity (ts, status) VALUES ($ts, $status)");
@@ -149,22 +88,55 @@ function seedActivity(rows: Array<{ ts: number; status: string }>): Database {
   return db;
 }
 
-test("windowedCounters counts requests and errors only inside the window", () => {
+test("activityCounters counts all requests and errors", () => {
   const now = 1_000_000_000_000;
   const db = seedActivity([
-    { ts: now - 2 * HOUR, status: "ok" }, // inside
-    { ts: now - 3 * HOUR, status: "error" }, // inside
-    { ts: now - 4 * HOUR, status: "pending" }, // inside
-    { ts: now - 10 * HOUR, status: "error" }, // outside 5h
+    { ts: now - 2 * HOUR, status: "ok" },
+    { ts: now - 3 * HOUR, status: "error" },
+    { ts: now - 4 * HOUR, status: "pending" },
+    { ts: now - 10 * HOUR, status: "error" },
   ]);
-  expect(windowedCounters(periodSince("5h", now), db)).toEqual({ requests: 3, errors: 1 });
-  expect(windowedCounters(periodSince("all", now), db)).toEqual({ requests: 4, errors: 2 });
+  expect(activityCounters(db)).toEqual({ requests: 4, errors: 2 });
 });
 
-test("windowedCounters is zeros on an empty window", () => {
+test("activityCounters is zeros on an empty table", () => {
+  expect(activityCounters(seedActivity([]))).toEqual({ requests: 0, errors: 0 });
+});
+
+test("activityPage returns the newest rows first, limited", () => {
   const now = 1_000_000_000_000;
-  const db = seedActivity([{ ts: now - 2 * HOUR, status: "ok" }]);
-  expect(windowedCounters(now + DAY, db)).toEqual({ requests: 0, errors: 0 });
+  const db = seedActivity([
+    { ts: now - 4 * HOUR, status: "ok" }, // id 1
+    { ts: now - 3 * HOUR, status: "error" }, // id 2
+    { ts: now - 2 * HOUR, status: "ok" }, // id 3
+    { ts: now - 1 * HOUR, status: "pending" }, // id 4
+  ]);
+  const page = activityPage(2, undefined, "all", db);
+  expect(page.map((r) => r.id)).toEqual([4, 3]);
+});
+
+test("activityPage paginates by keyset on id (rows older than the cursor)", () => {
+  const now = 1_000_000_000_000;
+  const db = seedActivity([
+    { ts: now - 4 * HOUR, status: "ok" }, // id 1
+    { ts: now - 3 * HOUR, status: "error" }, // id 2
+    { ts: now - 2 * HOUR, status: "ok" }, // id 3
+    { ts: now - 1 * HOUR, status: "pending" }, // id 4
+  ]);
+  const page = activityPage(2, 3, "all", db); // rows with id < 3
+  expect(page.map((r) => r.id)).toEqual([2, 1]);
+});
+
+test("activityPage scopes by status filter", () => {
+  const now = 1_000_000_000_000;
+  const db = seedActivity([
+    { ts: now - 4 * HOUR, status: "ok" }, // id 1
+    { ts: now - 3 * HOUR, status: "error" }, // id 2
+    { ts: now - 2 * HOUR, status: "pending" }, // id 3
+    { ts: now - 1 * HOUR, status: "error" }, // id 4
+  ]);
+  expect(activityPage(10, undefined, "errors", db).map((r: ActivityRow) => r.id)).toEqual([4, 2]);
+  expect(activityPage(10, undefined, "pending", db).map((r: ActivityRow) => r.id)).toEqual([3]);
 });
 
 test("pendingCount counts in-flight rows regardless of the window", () => {
@@ -182,6 +154,57 @@ test("pendingCount is 0 when nothing is in-flight", () => {
   const now = 1_000_000_000_000;
   const db = seedActivity([{ ts: now - 1 * HOUR, status: "ok" }]);
   expect(pendingCount(db)).toBe(0);
+});
+
+test("sweepPendingActivity errors out every pending row and leaves others alone", () => {
+  const now = 1_000_000_000_000;
+  const db = seedActivity([
+    { ts: now - 1 * HOUR, status: "pending" },
+    { ts: now - 20 * DAY, status: "pending" },
+    { ts: now - 1 * HOUR, status: "ok" },
+    { ts: now - 1 * HOUR, status: "error" },
+  ]);
+  expect(sweepPendingActivity(db)).toBe(2);
+  expect(pendingCount(db)).toBe(0);
+  expect(activityCounters(db)).toEqual({ requests: 4, errors: 3 });
+  const swept = activityPage(10, undefined, "errors", db).find((r) => r.id === 1);
+  expect(swept?.note).toBe("interrupted by server restart");
+});
+
+test("sweepPendingActivity is a no-op when nothing is pending", () => {
+  const now = 1_000_000_000_000;
+  const db = seedActivity([{ ts: now - 1 * HOUR, status: "ok" }]);
+  expect(sweepPendingActivity(db)).toBe(0);
+  expect(activityCounters(db)).toEqual({ requests: 1, errors: 0 });
+});
+
+test("purgeExpiredActivity deletes rows past retention and keeps the rest", () => {
+  const now = 1_000_000_000_000;
+  const db = seedActivity([
+    { ts: now - 8 * DAY, status: "ok" }, // id 1 — expired
+    { ts: now - 8 * DAY, status: "pending" }, // id 2 — expired, pending is not spared
+    { ts: now - 6 * DAY, status: "error" }, // id 3 — retained
+    { ts: now - 1 * HOUR, status: "ok" }, // id 4 — retained
+  ]);
+  expect(purgeExpiredActivity(now, db)).toBe(2);
+  expect(activityPage(10, undefined, "all", db).map((r) => r.id)).toEqual([4, 3]);
+});
+
+test("purgeExpiredActivity keeps a row exactly at the retention boundary", () => {
+  const now = 1_000_000_000_000;
+  const db = seedActivity([{ ts: now - RETENTION_MS, status: "ok" }]);
+  expect(purgeExpiredActivity(now, db)).toBe(0);
+  expect(activityCounters(db)).toEqual({ requests: 1, errors: 0 });
+});
+
+test("purgeExpiredActivity is a no-op when everything is within retention", () => {
+  const now = 1_000_000_000_000;
+  const db = seedActivity([
+    { ts: now - 1 * HOUR, status: "ok" },
+    { ts: now - 6 * DAY, status: "error" },
+  ]);
+  expect(purgeExpiredActivity(now, db)).toBe(0);
+  expect(activityCounters(db)).toEqual({ requests: 2, errors: 1 });
 });
 
 // --- plan usage --------------------------------------------------------------

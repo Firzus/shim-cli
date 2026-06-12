@@ -16,19 +16,17 @@ import {
 import { PORT, TUNNEL_HOSTNAME } from "../config.ts";
 import { allProviders, getProvider } from "../providers/registry.ts";
 import {
-  bucketedCacheSamples,
-  type CacheSample,
-  DEFAULT_PERIOD,
+  type ActivityFilter,
+  type ActivityRow,
+  activityCounters,
+  activityPage,
+  type CacheTotals,
+  cacheTotals,
   getPlanUsage,
   getSelection,
-  nextPeriod,
   pendingCount,
-  type Period,
-  periodSince,
   type PlanWindow,
-  recentActivity,
   setSelection,
-  windowedCounters,
 } from "../store/state.ts";
 import type { AuthStatus, Effort, ProviderId, ProviderModel, Selection } from "../providers/types.ts";
 import { createClipboard } from "./clipboard.ts";
@@ -149,52 +147,28 @@ export function optimisticReset(window: PlanWindow, now: number): PlanWindow {
   return window;
 }
 
-/** 0–1 rate → block glyph, lowest to highest. */
-const SPARK_GLYPHS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
-
-/**
- * Map a sequence of 0–1 rates to block glyphs, one per rate in order — the
- * shape of the cache behaviour over time, where a cold stretch reads as a
- * visible trough. Rates are clamped into the glyph scale. Pure.
- */
-export function sparkline(rates: readonly number[]): string {
-  return rates
-    .map((r) => {
-      const i = Math.min(SPARK_GLYPHS.length - 1, Math.max(0, Math.floor(r * SPARK_GLYPHS.length)));
-      return SPARK_GLYPHS[i]!;
-    })
-    .join("");
-}
-
 /** The cache-rate line, split so the mount can colour each part by its role. */
 export interface CacheRateView {
-  /** `cache rate (all)` — dim. */
+  /** `cache` — dim. */
   label: string;
-  /** One glyph per history bucket, oldest → newest; "" with no measured rows. */
-  spark: string;
-  /** All-time aggregate percent (0% with no measured rows) — value brightness. */
+  /** Aggregate percent over the retained history (0% with no measured rows) — value brightness. */
   value: string;
   /** `1.2k cached / 2.7k input`, or "" with no measured rows — dim. */
   detail: string;
 }
 
 /**
- * Derive the cache-rate line from the bucketed history samples (oldest →
- * newest). Both the bucketed sparkline and the aggregate percent come from the
- * same samples, so the two can never disagree; per ADR-0004 the aggregate is
- * `Σcached / Σinput` over the whole measured history and cache creation is
- * never folded in. No measured rows renders 0%. Pure.
+ * Derive the cache-rate line from the cache totals. Per ADR-0004 the rate is
+ * `Σcached / Σinput` over the whole measured retained history and cache
+ * creation is never folded in. No measured rows renders 0%. Pure.
  */
-export function cacheRateView(samples: readonly CacheSample[]): CacheRateView {
-  const label = "cache rate (all)";
-  const cached = samples.reduce((sum, s) => sum + s.cached, 0);
-  const input = samples.reduce((sum, s) => sum + s.input, 0);
-  if (input <= 0) return { label, spark: "", value: "0%", detail: "" };
+export function cacheRateView(totals: CacheTotals): CacheRateView {
+  const label = "cache";
+  if (totals.input <= 0) return { label, value: "0%", detail: "" };
   return {
     label,
-    spark: sparkline(samples.map((s) => (s.input > 0 ? s.cached / s.input : 0))),
-    value: `${Math.round((cached / input) * 100)}%`,
-    detail: `${abbreviateCount(cached)} cached / ${abbreviateCount(input)} input`,
+    value: `${Math.round((totals.cached / totals.input) * 100)}%`,
+    detail: `${abbreviateCount(totals.cached)} cached / ${abbreviateCount(totals.input)} input`,
   };
 }
 
@@ -205,17 +179,15 @@ export interface LabelledValue {
 }
 
 /**
- * The counters line as label/value pairs: requests + errors over the selected
- * `w` period, plus the period itself under the `window` label so the `w` key's
- * target is legible. In-flight load lives in the activity frame title, where
- * the requests themselves appear. Counts are abbreviated like the rest of the
- * panel. Pure.
+ * The counters line as label/value pairs: requests + errors over the retained
+ * history. In-flight
+ * load lives in the activity frame title, where the requests themselves appear.
+ * Counts are abbreviated like the rest of the panel. Pure.
  */
-export function countersView(c: { requests: number; errors: number }, period: Period): LabelledValue[] {
+export function countersView(c: { requests: number; errors: number }): LabelledValue[] {
   return [
     { label: "requests", value: abbreviateCount(c.requests) },
     { label: "errors", value: abbreviateCount(c.errors) },
-    { label: "window", value: period },
   ];
 }
 
@@ -433,12 +405,12 @@ export function clipColumns(cells: ActivityCell[], width: number, gap = 1): Acti
 // --- input modes + footer hints (pure) ----------------------------------------
 
 /**
- * The single modal input-mode concept: while a picker or the error detail is
- * open, global keys are inert and the footer hints swap to the modal's
- * controls. The hints presenter takes this kind, so the footer cannot drift
- * from the actual key handling.
+ * The modal input-mode concept: while a picker is open, global keys are inert
+ * and the footer hints swap to the picker's controls. The activity detail is
+ * *not* modal — it expands inline and ↑↓ navigation keeps working — so it is
+ * not a mode, just a per-row expanded flag tracked in the default mode.
  */
-export type InputModeKind = "default" | "picker" | "error-detail";
+export type InputModeKind = "default" | "picker";
 
 /** One footer hint: the trigger key and the action word it triggers. */
 export interface Hint {
@@ -446,27 +418,52 @@ export interface Hint {
   label: string;
 }
 
-/** The footer hints for an input mode — one source for the whole footer. Pure. */
-export function hintsFor(mode: InputModeKind): Hint[] {
-  switch (mode) {
-    case "picker":
-      return [
-        { key: "↑↓", label: "move" },
-        { key: "⏎", label: "select" },
-        { key: "esc", label: "cancel" },
-      ];
-    case "error-detail":
-      return [{ key: "esc", label: "close" }];
-    default:
-      return [
-        { key: "p", label: "provider" },
-        { key: "m", label: "model" },
-        { key: "e", label: "effort" },
-        { key: "w", label: "window" },
-        { key: "c", label: "copy" },
-        { key: "q", label: "quit" },
-      ];
+/**
+ * The context the footer reflects: the input mode, plus (in default mode)
+ * whether follow is paused, whether a row is focused, and the active filter —
+ * so the keycaps cannot drift from what the keys actually do right now.
+ */
+export interface FooterContext {
+  mode: InputModeKind;
+  paused?: boolean;
+  focused?: boolean;
+  filter?: ActivityFilter;
+}
+
+/** The footer hints for the current context — one source for the whole footer. Pure. */
+export function hintsFor(ctx: FooterContext): Hint[] {
+  if (ctx.mode === "picker") {
+    return [
+      { key: "↑↓", label: "move" },
+      { key: "⏎", label: "select" },
+      { key: "esc", label: "cancel" },
+    ];
   }
+  const hints: Hint[] = [];
+  if (ctx.paused) hints.push({ key: "esc", label: "resume" });
+  hints.push({ key: "↑↓", label: "move" });
+  if (ctx.focused) hints.push({ key: "⏎", label: "detail" });
+  hints.push({ key: "f", label: `filter ${ctx.filter ?? "all"}` });
+  hints.push({ key: "p", label: "provider" });
+  hints.push({ key: "m", label: "model" });
+  hints.push({ key: "e", label: "effort" });
+  hints.push({ key: "c", label: ctx.focused ? "copy id" : "copy" });
+  hints.push({ key: "q", label: "quit" });
+  return hints;
+}
+
+/** Cycle the activity status filter: all → errors → pending → all. Pure. */
+export function cycleFilter(filter: ActivityFilter): ActivityFilter {
+  return filter === "all" ? "errors" : filter === "errors" ? "pending" : "all";
+}
+
+/**
+ * The paused-follow separator text: a plain marker, or one carrying the count
+ * of rows that arrived at the head while follow was paused. Pure.
+ */
+export function followSeparator(newCount: number): string {
+  if (newCount <= 0) return "── follow paused ──";
+  return `── follow paused · ${abbreviateCount(newCount)} new ──`;
 }
 
 /**
@@ -573,12 +570,7 @@ export function pickerRows(state: PickerState): Array<{ text: string; active: bo
   }));
 }
 
-// --- error detail overlay (pure) -----------------------------------------------
-
-/** The most recent error row in a newest-first window, if any. Pure. */
-export function latestError<T extends { status: string }>(rows: readonly T[]): T | undefined {
-  return rows.find((r) => r.status === "error");
-}
+// --- inline row detail (pure) --------------------------------------------------
 
 /**
  * Word-wrap `text` to `width` columns, hard-breaking words longer than a line
@@ -609,28 +601,135 @@ export function wrapText(text: string, width: number): string[] {
   return lines.length ? lines : [""];
 }
 
+/** Shape the inline-detail presenter reads from a focused activity row. */
+interface DetailRowInput {
+  status: string;
+  effort: string;
+  duration_ms: number | null;
+  note: string | null;
+  request_id: string;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  cached_tokens: number | null;
+  cache_creation: number | null;
+}
+
+/** Format a token count for the detail block, or "—" when unmeasured. Pure. */
+function detailToken(n: number | null): string {
+  return n == null ? "—" : String(n);
+}
+
 /**
- * Assemble the error-detail overlay content: a header line (time, source,
- * duration), the request_id, then the full note wrapped to `width` — truncated
- * with a `…` line only when it exceeds `maxNoteLines` (a short terminal). Pure.
+ * Assemble the inline detail block shown under a focused activity row when it
+ * is expanded (⏎). A meta line (request_id, effort, duration), then either the
+ * full error note wrapped to `width` (for an error row) or the full token
+ * breakdown (prompt / completion / cached / wrote). The note is truncated with
+ * a `…` line only when it exceeds `maxNoteLines` (a short terminal). Replaces
+ * the old modal error-detail overlay; pure, so it stays unit-tested.
  */
-export function errorDetailLines(
-  row: {
-    ts: number;
-    provider: string;
-    model: string;
-    duration_ms: number | null;
-    note: string | null;
-    request_id: string;
-  },
-  timeStr: string,
+export function detailLines(
+  row: DetailRowInput,
   width: number,
   maxNoteLines = Number.POSITIVE_INFINITY,
 ): string[] {
-  const duration = row.duration_ms != null ? `  ${row.duration_ms}ms` : "";
-  const note = wrapText(row.note ?? "(no note recorded)", width);
-  const clipped = note.length > maxNoteLines ? [...note.slice(0, Math.max(1, maxNoteLines - 1)), "…"] : note;
-  return [`${timeStr}  ${row.provider}/${row.model}${duration}`, `request_id ${row.request_id}`, "", ...clipped];
+  const duration = row.duration_ms != null ? `  ·  ${row.duration_ms}ms` : "";
+  const meta = `request_id ${row.request_id}  ·  effort ${row.effort}${duration}`;
+  if (row.status === "error") {
+    const note = wrapText(row.note ?? "(no note recorded)", width);
+    const clipped = note.length > maxNoteLines ? [...note.slice(0, Math.max(1, maxNoteLines - 1)), "…"] : note;
+    return [meta, ...clipped];
+  }
+  const tokens =
+    `prompt ${detailToken(row.prompt_tokens)}  ·  completion ${detailToken(row.completion_tokens)}` +
+    `  ·  cached ${detailToken(row.cached_tokens)}  ·  wrote ${detailToken(row.cache_creation)}`;
+  return [meta, tokens];
+}
+
+// --- focus + follow (pure state machine) ---------------------------------------
+
+/**
+ * The activity stream's navigation state. `focus` is the index into the loaded
+ * rows (newest-first) of the focused row, or null when nothing is focused
+ * (fresh start / empty stream). `expanded` is whether the focused row's inline
+ * detail is open. `following` is true while the stream auto-scrolls with new
+ * rows (focus pinned at the head); navigating away pauses it. `newWhilePaused`
+ * counts rows that arrived at the head since follow paused, for the separator.
+ */
+export interface StreamState {
+  focus: number | null;
+  expanded: boolean;
+  following: boolean;
+  newWhilePaused: number;
+}
+
+/** The initial stream state: following the head, nothing focused or expanded. Pure. */
+export function initialStreamState(): StreamState {
+  return { focus: null, expanded: false, following: true, newWhilePaused: 0 };
+}
+
+/**
+ * Move the focus by `delta` within a stream of `rowCount` rows (newest-first,
+ * so index 0 is the head). The first move from "nothing focused" lands on the
+ * head. Focus clamps at both ends (no wrap — the ends are meaningful: the head
+ * is "now", the tail is "scroll for more"). Moving away from the head pauses
+ * follow; returning to the head (index 0) resumes it and clears the new-row
+ * counter. Collapses any open detail when the focus actually moves. Pure.
+ */
+export function moveFocus(state: StreamState, delta: number, rowCount: number): StreamState {
+  if (rowCount <= 0) return { ...state, focus: null, expanded: false };
+  // The first move from "nothing focused" lands on the head, regardless of
+  // direction — there is nowhere above the head to go.
+  const next = state.focus == null ? 0 : Math.max(0, Math.min(rowCount - 1, state.focus + delta));
+  const moved = next !== state.focus;
+  const following = next === 0;
+  return {
+    focus: next,
+    expanded: moved ? false : state.expanded,
+    following,
+    newWhilePaused: following ? 0 : state.newWhilePaused,
+  };
+}
+
+/** Toggle the focused row's inline detail. A no-op when nothing is focused. Pure. */
+export function toggleExpanded(state: StreamState): StreamState {
+  if (state.focus == null) return state;
+  return { ...state, expanded: !state.expanded };
+}
+
+/**
+ * Resume following from a paused state (the `esc` action): pin focus back to
+ * the head, clear the new-row counter, and collapse any open detail. Pure.
+ */
+export function resumeFollow(state: StreamState): StreamState {
+  return { focus: 0, expanded: false, following: true, newWhilePaused: 0 };
+}
+
+/**
+ * Fold a fresh data poll into the stream state. `added` is how many new rows
+ * appeared at the head since the last poll. While following, the focus stays at
+ * the head and the view shifts with the new rows (nothing to track). While
+ * paused, the focus must stay on the *same* row even as rows shift down, so it
+ * advances by `added`; the new rows are counted for the separator. Pure — the
+ * caller supplies `added` (computed from row ids across polls).
+ */
+export function onPoll(state: StreamState, added: number, rowCount: number): StreamState {
+  if (state.following || state.focus == null) return state;
+  if (added <= 0) return state;
+  const focus = Math.min(rowCount - 1, state.focus + added);
+  return { ...state, focus, newWhilePaused: state.newWhilePaused + added };
+}
+
+// --- layout tier (pure) --------------------------------------------------------
+
+/** The responsive layout tier, chosen by terminal width alone. */
+export type LayoutTier = "wide" | "compact";
+
+/** Width at or above which the right sidebar is shown; below it folds to a compact header. */
+export const SIDEBAR_MIN_COLS = 100;
+
+/** Choose the layout tier from the terminal width. Pure. */
+export function layoutTier(cols: number): LayoutTier {
+  return cols >= SIDEBAR_MIN_COLS ? "wide" : "compact";
 }
 
 // --- empty state (pure) ----------------------------------------------------------
@@ -655,17 +754,22 @@ export function emptyState(url: string): EmptyState {
 // --- OpenTUI mount -----------------------------------------------------------
 //
 // The mount layer below is intentionally thin and untested: it builds the
-// chrome (three zones) once and pushes fresh StyledText into the Text
-// renderables on each cadence. All formatting decisions live in the pure
-// presenters above; the native core owns differential rendering (no flicker)
-// and the Yoga flexbox layout (the chrome structure).
+// chrome once and pushes fresh StyledText into the Text renderables on each
+// cadence. All formatting decisions live in the pure presenters above; the
+// native core owns differential rendering (no flicker) and the Yoga flexbox
+// layout (the chrome structure).
 //
-// Colour roles, defined once: accent cyan for chrome and the active selection,
-// green/yellow/red strictly semantic, dim reserved for labels, default
-// brightness for values. Status is never conveyed by colour alone (glyphs).
+// Colour roles (quiet chrome): borders and titles are dim grey so the eye lands
+// on data, not frames. Accent cyan is reserved for three roles only — the
+// active selection values, the focused activity row, and the footer keycaps.
+// green/yellow/red are strictly semantic; status is never conveyed by colour
+// alone (glyphs carry it).
 
-/** Single cyan accent for the chrome (border + title + keycaps). */
+/** Cyan accent — reserved for the selection, the focused row, and the keycaps. */
 const ACCENT = "#22d3ee";
+
+/** Dim grey for the quiet chrome: frame borders and titles. */
+const CHROME = "#3a414d";
 
 /** Default-brightness chunk for values — the data the operator's eye lands on. */
 function value(text: string): TextChunk {
@@ -704,8 +808,13 @@ function joinLines(lines: StyledText[]): StyledText {
  * presenter. Status keeps glyph+word semantics (green/red, spinner yellow);
  * the token witness and duration are values (default brightness); time and
  * source are labels (dim). Cells arrive padded, so match on the trimmed text.
+ *
+ * A focused row is rendered in accent cyan throughout — the one place (besides
+ * the selection and keycaps) that earns the accent — so the focus reads at a
+ * glance without relying on colour to carry *status* (the glyph still does).
  */
-function colourCell(cell: ActivityCell): TextChunk {
+function colourCell(cell: ActivityCell, focused: boolean): TextChunk {
+  if (focused) return cyan(cell.text);
   switch (cell.kind) {
     case "status": {
       const word = cell.text.trim();
@@ -723,12 +832,37 @@ function colourCell(cell: ActivityCell): TextChunk {
   }
 }
 
+/** Render one plan-usage snapshot as two bars, or a neutral state, into lines. */
+function planLines(provider: ReturnType<typeof getProvider>, providerId: string, now: number): StyledText[] {
+  if (!provider.reportsPlanUsage) return [new StyledText([dim("n/a — no plan usage")])];
+  const usage = getPlanUsage(providerId);
+  if (!usage) return [new StyledText([dim("(no data yet)")])];
+  const bar = (label: string, raw: PlanWindow): StyledText => {
+    const w = optimisticReset(raw, now);
+    const parts = planUsageParts(label, w, now);
+    const chunks: TextChunk[] = [
+      dim(parts.label),
+      LEVEL_COLOR[usageLevel(w.utilization)](`${parts.bar} ${parts.pct}`),
+    ];
+    if (parts.flag) chunks.push(red(`  ${parts.flag}`));
+    return new StyledText(chunks);
+  };
+  const resetLine = (label: string, raw: PlanWindow): StyledText =>
+    new StyledText([dim(`${label}${planUsageParts(label, optimisticReset(raw, now), now).reset}`)]);
+  return [
+    bar("5h", usage.fiveHour),
+    resetLine("       ", usage.fiveHour),
+    bar("weekly", usage.weekly),
+    resetLine("       ", usage.weekly),
+  ];
+}
+
 /**
  * Live control panel. Reads selection + activity from the shared store and
  * writes the selection back when you commit a picker — that store is the
  * control channel to the background service.
  *
- *   p provider · m model · e effort · w window · c copy · q quit · ⏎ error detail
+ *   ↑↓ move · ⏎ detail · f filter · p/m/e select · c copy · q quit
  */
 export async function runTui(): Promise<void> {
   const providers = allProviders();
@@ -736,9 +870,11 @@ export async function runTui(): Promise<void> {
   const modelLabels = new Map<string, string>();
   for (const entry of catalog) for (const m of entry.models) modelLabels.set(m.id, slugLabel(m.label));
   let sel = getSelection();
-  let period: Period = DEFAULT_PERIOD;
   const authCache = new Map<ProviderId, AuthStatus>();
   const clipboard = createClipboard();
+
+  let filter: ActivityFilter = "all";
+  let streamState = initialStreamState();
 
   const refreshAuth = async (): Promise<void> => {
     await Promise.all(
@@ -754,7 +890,7 @@ export async function runTui(): Promise<void> {
 
   const renderer = await createCliRenderer({ exitOnCtrlC: false, targetFps: 30 });
 
-  // --- chrome: three zones, built once -------------------------------------
+  // --- chrome: two columns, built once -------------------------------------
   const app = new BoxRenderable(renderer, {
     id: "app",
     width: "100%",
@@ -762,71 +898,101 @@ export async function runTui(): Promise<void> {
     flexDirection: "column",
   });
 
-  const statusBar = new BoxRenderable(renderer, {
-    id: "status",
+  // Top strip: the brand + active selection (compact header carries the
+  // condensed metrics in the narrow tier).
+  const header = new BoxRenderable(renderer, {
+    id: "header",
     flexDirection: "column",
     paddingLeft: 1,
     paddingRight: 1,
   });
   const selText = new TextRenderable(renderer, { id: "sel", content: "" });
-  const metaText = new TextRenderable(renderer, { id: "meta", content: "" });
-  statusBar.add(selText);
-  statusBar.add(metaText);
+  const compactText = new TextRenderable(renderer, { id: "compact", content: "" });
+  header.add(selText);
+  header.add(compactText);
 
+  // Body: activity stream (left, grows) + sidebar (right, fixed width). The
+  // sidebar collapses to width 0 in the compact tier.
+  const body = new BoxRenderable(renderer, { id: "body", flexGrow: 1, flexDirection: "row" });
   const stream = new BoxRenderable(renderer, {
     id: "stream",
     flexGrow: 1,
     border: true,
     borderStyle: "rounded",
-    borderColor: ACCENT,
+    borderColor: CHROME,
     title: " activity ",
-    titleColor: ACCENT,
+    titleColor: CHROME,
     paddingLeft: 1,
     paddingRight: 1,
   });
   const streamText = new TextRenderable(renderer, { id: "streamText", content: "" });
   stream.add(streamText);
 
-  // Two titled frames side by side: plan usage (scoped to the active provider)
-  // on the left, traffic (cache rate + counters) on the right — so the operator
-  // knows which numbers belong to which concern.
-  const metricsRow = new BoxRenderable(renderer, { id: "metricsRow", flexDirection: "row" });
+  const sidebar = new BoxRenderable(renderer, { id: "sidebar", width: 34, flexDirection: "column", marginLeft: 1 });
+  const statusFrame = new BoxRenderable(renderer, {
+    id: "statusFrame",
+    border: true,
+    borderStyle: "single",
+    borderColor: CHROME,
+    title: " status ",
+    titleColor: CHROME,
+    paddingLeft: 1,
+    paddingRight: 1,
+  });
+  const statusText = new TextRenderable(renderer, { id: "statusText", content: "" });
+  statusFrame.add(statusText);
   const planFrame = new BoxRenderable(renderer, {
     id: "planFrame",
-    flexGrow: 1,
     border: true,
     borderStyle: "single",
-    borderColor: ACCENT,
+    borderColor: CHROME,
     title: " plan ",
-    titleColor: ACCENT,
+    titleColor: CHROME,
     paddingLeft: 1,
     paddingRight: 1,
-  });
-  const trafficFrame = new BoxRenderable(renderer, {
-    id: "trafficFrame",
-    flexGrow: 1,
-    border: true,
-    borderStyle: "single",
-    borderColor: ACCENT,
-    title: " traffic ",
-    titleColor: ACCENT,
-    paddingLeft: 1,
-    paddingRight: 1,
+    marginTop: 1,
   });
   const planText = new TextRenderable(renderer, { id: "plan", content: "" });
-  const trafficText = new TextRenderable(renderer, { id: "traffic", content: "" });
   planFrame.add(planText);
+  const trafficFrame = new BoxRenderable(renderer, {
+    id: "trafficFrame",
+    border: true,
+    borderStyle: "single",
+    borderColor: CHROME,
+    title: " traffic ",
+    titleColor: CHROME,
+    paddingLeft: 1,
+    paddingRight: 1,
+    marginTop: 1,
+  });
+  const trafficText = new TextRenderable(renderer, { id: "traffic", content: "" });
   trafficFrame.add(trafficText);
-  metricsRow.add(planFrame);
-  metricsRow.add(trafficFrame);
+  const providersFrame = new BoxRenderable(renderer, {
+    id: "providersFrame",
+    border: true,
+    borderStyle: "single",
+    borderColor: CHROME,
+    title: " providers ",
+    titleColor: CHROME,
+    paddingLeft: 1,
+    paddingRight: 1,
+    marginTop: 1,
+  });
+  const providersText = new TextRenderable(renderer, { id: "providersText", content: "" });
+  providersFrame.add(providersText);
+  sidebar.add(statusFrame);
+  sidebar.add(planFrame);
+  sidebar.add(trafficFrame);
+  sidebar.add(providersFrame);
+  body.add(stream);
+  body.add(sidebar);
 
   const hintsBar = new BoxRenderable(renderer, { id: "hintsBar", paddingLeft: 1, paddingRight: 1 });
   const hintsText = new TextRenderable(renderer, { id: "hints", content: "" });
   hintsBar.add(hintsText);
 
-  app.add(statusBar);
-  app.add(stream);
-  app.add(metricsRow);
+  app.add(header);
+  app.add(body);
   app.add(hintsBar);
   renderer.root.add(app);
 
@@ -849,7 +1015,8 @@ export async function runTui(): Promise<void> {
   renderer.root.add(guard);
 
   // Modal overlay: a single centered absolute box (same mechanic as the
-  // min-size guard) shared by the pickers and the error detail.
+  // min-size guard) used only by the pickers now — the activity detail is
+  // inline, not modal.
   const overlayWrap = new BoxRenderable(renderer, {
     id: "overlayWrap",
     position: "absolute",
@@ -875,16 +1042,18 @@ export async function runTui(): Promise<void> {
   overlayWrap.add(overlayBox);
   renderer.root.add(overlayWrap);
 
-  // --- modal input mode ------------------------------------------------------
-  type Mode =
-    | { kind: "default" }
-    | { kind: "picker"; state: PickerState }
-    | { kind: "error-detail"; row: ReturnType<typeof recentActivity>[number] };
+  // --- input mode: picker (the only modal) -----------------------------------
+  type Mode = { kind: "default" } | { kind: "picker"; state: PickerState };
   let mode: Mode = { kind: "default" };
+
+  const footerContext = (): FooterContext =>
+    mode.kind === "picker"
+      ? { mode: "picker" }
+      : { mode: "default", paused: !streamState.following, focused: streamState.focus != null, filter };
 
   const renderHints = (): void => {
     const chunks: TextChunk[] = [];
-    hintsFor(mode.kind).forEach((hint, i) => {
+    hintsFor(footerContext()).forEach((hint, i) => {
       if (i > 0) chunks.push(SPACE, SPACE);
       const { cap, rest } = keycapParts(hint);
       chunks.push(cyan(cap));
@@ -894,30 +1063,15 @@ export async function runTui(): Promise<void> {
   };
 
   const renderOverlay = (): void => {
-    if (mode.kind === "default") {
+    if (mode.kind !== "picker") {
       overlayWrap.visible = false;
       return;
     }
     overlayWrap.visible = true;
-    if (mode.kind === "picker") {
-      overlayBox.title = ` ${mode.state.kind} `;
-      overlayText.content = joinLines(
-        pickerRows(mode.state).map((r) => new StyledText([r.active ? bold(cyan(r.text)) : value(r.text)])),
-      );
-    } else {
-      overlayBox.title = " error ";
-      const width = Math.min(56, Math.max(20, renderer.terminalWidth - 8));
-      const maxNoteLines = Math.max(1, renderer.terminalHeight - 8);
-      const lines = errorDetailLines(
-        mode.row,
-        new Date(mode.row.ts).toLocaleTimeString(),
-        width,
-        maxNoteLines,
-      );
-      overlayText.content = joinLines(
-        lines.map((line, i) => new StyledText([i === 0 ? dim(line || " ") : value(line || " ")])),
-      );
-    }
+    overlayBox.title = ` ${mode.state.kind} `;
+    overlayText.content = joinLines(
+      pickerRows(mode.state).map((r) => new StyledText([r.active ? bold(cyan(r.text)) : value(r.text)])),
+    );
   };
 
   const setMode = (next: Mode): void => {
@@ -927,8 +1081,8 @@ export async function runTui(): Promise<void> {
     renderer.requestRender();
   };
 
-  // Brief meta-strip flash (e.g. copy confirmation); the data poll clears it
-  // on the first render after it expires.
+  // Brief flash (e.g. copy confirmation); the data poll clears it on the first
+  // render after it expires.
   let flash: { text: string; level: "ok" | "warn"; until: number } | null = null;
   const showFlash = (text: string, level: "ok" | "warn"): void => {
     flash = { text, level, until: Date.now() + FLASH_MS };
@@ -939,12 +1093,18 @@ export async function runTui(): Promise<void> {
   // re-render the spinner + live elapsed of in-flight rows without re-hitting
   // the store. The inner content area excludes the border (2 rows / 2 cols) and
   // the horizontal padding (2 cols); fall back to a small size before first layout.
-  let cachedRows: ReturnType<typeof recentActivity> = [];
+  let cachedRows: ActivityRow[] = [];
   let inFlight = 0;
+  let topRowId: number | null = null;
   const streamInner = (): { h: number; w: number } => ({
     h: stream.height > 2 ? stream.height - 2 : 8,
     w: stream.width > 4 ? stream.width - 4 : 40,
   });
+
+  /** The focused row, if any, from the cached page. */
+  const focusedRow = (): ActivityRow | undefined =>
+    streamState.focus != null ? cachedRows[streamState.focus] : undefined;
+
   const renderStream = (innerWidth: number, now: number): void => {
     stream.title = activityTitle(inFlight, now);
     if (!cachedRows.length) {
@@ -957,33 +1117,45 @@ export async function runTui(): Promise<void> {
       return;
     }
     const padded = padColumns(
-      cachedRows.map((r) =>
-        activityColumns(r, new Date(r.ts).toLocaleTimeString(), now, { labels: modelLabels }),
-      ),
+      cachedRows.map((r) => activityColumns(r, new Date(r.ts).toLocaleTimeString(), now, { labels: modelLabels })),
     );
-    streamText.content = joinLines(
-      padded.map((cells) => {
-        const kept = clipColumns(cells, innerWidth, COL_GAP);
-        const chunks: TextChunk[] = [];
-        kept.forEach((cell, i) => {
-          if (i > 0) chunks.push(value(" ".repeat(COL_GAP)));
-          chunks.push(colourCell(cell));
-        });
-        return new StyledText(chunks);
-      }),
-    );
+    const lines: StyledText[] = [];
+    padded.forEach((cells, i) => {
+      const focused = i === streamState.focus;
+      const marker = focused ? cyan("▸ ") : dim("  ");
+      const kept = clipColumns(cells, innerWidth - 2, COL_GAP);
+      const chunks: TextChunk[] = [marker];
+      kept.forEach((cell, j) => {
+        if (j > 0) chunks.push(value(" ".repeat(COL_GAP)));
+        chunks.push(colourCell(cell, focused));
+      });
+      lines.push(new StyledText(chunks));
+      // Inline detail under the focused row when expanded.
+      if (focused && streamState.expanded) {
+        const row = cachedRows[i]!;
+        for (const dl of detailLines(row, Math.max(20, innerWidth - 6))) {
+          lines.push(new StyledText([dim("    "), value(dl)]));
+        }
+      }
+    });
+    // Paused-follow separator at the foot of the stream.
+    if (!streamState.following) {
+      lines.push(new StyledText([yellow(followSeparator(streamState.newWhilePaused))]));
+    }
+    streamText.content = joinLines(lines);
   };
 
-  // Collapse the plan frame (width 0, hidden) when the active provider has no
-  // plan usage, so the traffic frame reclaims the space; guarded so the layout
-  // only reflows on an actual state change.
-  let planCollapsed = false;
-  const setPlanCollapsed = (collapsed: boolean): void => {
-    if (collapsed === planCollapsed) return;
-    planCollapsed = collapsed;
-    planFrame.visible = !collapsed;
-    planFrame.flexGrow = collapsed ? 0 : 1;
-    planFrame.width = collapsed ? 0 : "auto";
+  // Collapse the sidebar (width 0, hidden) in the compact tier; guarded so the
+  // layout only reflows on an actual tier change.
+  let currentTier: LayoutTier | null = null;
+  const setTier = (tier: LayoutTier): void => {
+    if (tier === currentTier) return;
+    currentTier = tier;
+    const wide = tier === "wide";
+    sidebar.visible = wide;
+    sidebar.width = wide ? 34 : 0;
+    sidebar.marginLeft = wide ? 1 : 0;
+    compactText.visible = !wide;
   };
 
   // The endpoint is fixed at startup (config is immutable at runtime).
@@ -994,8 +1166,6 @@ export async function runTui(): Promise<void> {
   const render = (): void => {
     const now = Date.now();
 
-    // min-size guard: below the threshold, hide the chrome and show one centered
-    // message; the overlay is absolute so the app's layout is untouched.
     if (isTerminalTooSmall(renderer.terminalWidth, renderer.terminalHeight)) {
       app.visible = false;
       overlayWrap.visible = false;
@@ -1006,10 +1176,12 @@ export async function runTui(): Promise<void> {
     }
     app.visible = true;
     guard.visible = false;
-    overlayWrap.visible = mode.kind !== "default";
+    overlayWrap.visible = mode.kind === "picker";
 
-    // tier 1: active selection, highlighted as the control anchor (bold accent
-    // values, dim labels) so the operator always knows which backend serves traffic.
+    const tier = layoutTier(renderer.terminalWidth);
+    setTier(tier);
+
+    // header: active selection, the control anchor (accent values, dim labels).
     selText.content = new StyledText([
       bold(cyan("shim")),
       dim("  provider "),
@@ -1020,80 +1192,89 @@ export async function runTui(): Promise<void> {
       bold(cyan(sel.effort)),
     ]);
 
-    // tier 2: dim meta strip — endpoint, tunnel state, per-provider auth dots,
-    // and the transient flash (e.g. `copied ✓`); a down provider surfaces its
-    // error detail inline.
-    const metaChunks: TextChunk[] = [
-      dim(`${endpoint.url}  `),
-      endpoint.tunnel === "up" ? green("tunnel up") : yellow("no tunnel"),
-    ];
-    for (const p of providers) {
-      const a = authCache.get(p.id);
-      const state = authDotState(a);
-      const dot = state === "ok" ? green("●") : state === "down" ? red("●") : dim("●");
-      metaChunks.push(SPACE, SPACE, dot, dim(` ${formatAuthMeta(p.id, a)}`));
-    }
-    if (flash && now <= flash.until) {
-      metaChunks.push(SPACE, SPACE, (flash.level === "ok" ? green : yellow)(flash.text));
-    } else {
-      flash = null;
-    }
-    metaText.content = new StyledText(metaChunks);
+    const provider = getProvider(sel.provider);
+    const rate = cacheRateView(cacheTotals());
+    const counters = activityCounters();
 
-    // center: activity stream (newest first), auto-filling the pane — read and
-    // cache the rows + in-flight count, then render them with the current `now`.
+    // compact tier: a single dense metrics line under the selection, standing in
+    // for the (hidden) sidebar.
+    if (tier === "compact") {
+      const usage = provider.reportsPlanUsage ? getPlanUsage(sel.provider) : null;
+      const compactChunks: TextChunk[] = [];
+      if (usage) {
+        const five = planUsageParts("5h", optimisticReset(usage.fiveHour, now), now);
+        const week = planUsageParts("wk", optimisticReset(usage.weekly, now), now);
+        compactChunks.push(
+          dim("5h "),
+          LEVEL_COLOR[usageLevel(usage.fiveHour.utilization)](five.pct.trim()),
+          dim("  wk "),
+          LEVEL_COLOR[usageLevel(usage.weekly.utilization)](week.pct.trim()),
+          dim("  ·  "),
+        );
+      }
+      compactChunks.push(dim("cache "), value(rate.value), dim("  req "), value(abbreviateCount(counters.requests)));
+      compactChunks.push(dim("  err "), counters.errors > 0 ? red(abbreviateCount(counters.errors)) : value("0"));
+      compactText.content = new StyledText(compactChunks);
+    }
+
+    // stream: keyset page scoped to the active filter, auto-filling the pane.
     const inner = streamInner();
-    cachedRows = recentActivity(inner.h);
+    const page = activityPage(inner.h, undefined, filter);
+    const newTopId = page[0]?.id ?? null;
+    const added = topRowId != null && newTopId != null && newTopId > topRowId
+      ? page.filter((r) => r.id > topRowId!).length
+      : 0;
+    topRowId = newTopId;
+    cachedRows = page;
     inFlight = pendingCount();
+    streamState = onPoll(streamState, added, cachedRows.length);
+    // Clamp focus if the page shrank (e.g. filter change).
+    if (streamState.focus != null && streamState.focus >= cachedRows.length) {
+      streamState = { ...streamState, focus: cachedRows.length ? cachedRows.length - 1 : null };
+    }
     renderStream(inner.w, now);
 
-    // bottom-left: plan usage, scoped to (and titled with) the active provider.
-    // A provider that does not capture plan usage (e.g. codex) collapses the
-    // frame; a capable provider with no snapshot yet shows "no data yet";
-    // otherwise two bars, each optimistically reset once its window's reset
-    // boundary has passed. Level colour applies to the bar + percent only, so
-    // the countdown stays readable regardless of usage level.
-    const provider = getProvider(sel.provider);
-    if (!provider.reportsPlanUsage) {
-      setPlanCollapsed(true);
-    } else {
-      setPlanCollapsed(false);
-      planFrame.title = ` plan · ${sel.provider} `;
-      const usage = getPlanUsage(sel.provider);
-      if (!usage) {
-        planText.content = new StyledText([dim("(no data yet)")]);
-      } else {
-        const bar = (label: string, raw: PlanWindow): StyledText => {
-          const w = optimisticReset(raw, now);
-          const parts = planUsageParts(label, w, now);
-          const chunks: TextChunk[] = [
-            dim(parts.label),
-            LEVEL_COLOR[usageLevel(w.utilization)](`${parts.bar} ${parts.pct}`),
-            value(`  ${parts.reset}`),
-          ];
-          if (parts.flag) chunks.push(red(`  ${parts.flag}`));
-          return new StyledText(chunks);
-        };
-        planText.content = joinLines([bar("5h", usage.fiveHour), bar("weekly", usage.weekly)]);
-      }
-    }
+    // sidebar — status (selection echoed compactly), plan, traffic, providers.
+    statusText.content = joinLines([
+      new StyledText([dim("provider  "), bold(cyan(sel.provider))]),
+      new StyledText([dim("model     "), bold(cyan(sel.model))]),
+      new StyledText([dim("effort    "), bold(cyan(sel.effort))]),
+    ]);
 
-    // bottom-right: traffic — cache rate (bucketed all-time sparkline +
-    // aggregate, both derived from the same SQL read) and the windowed counters.
-    const rate = cacheRateView(bucketedCacheSamples());
-    const rateChunks: TextChunk[] = [dim(`${rate.label}  `)];
-    if (rate.spark) rateChunks.push(value(rate.spark), value("  "));
-    rateChunks.push(value(rate.value));
-    if (rate.detail) rateChunks.push(dim(`  (${rate.detail})`));
+    planFrame.title = ` plan · ${sel.provider} `;
+    planText.content = joinLines(planLines(provider, sel.provider, now));
 
-    const counters = windowedCounters(periodSince(period, now));
+    const rateChunks: TextChunk[] = [dim(`${rate.label}  `), value(rate.value)];
     const counterChunks: TextChunk[] = [];
-    countersView(counters, period).forEach((part, i) => {
+    countersView(counters).forEach((part, i) => {
       if (i > 0) counterChunks.push(dim("  ·  "));
       counterChunks.push(dim(`${part.label} `));
       counterChunks.push(part.label === "errors" && counters.errors > 0 ? red(part.value) : value(part.value));
     });
-    trafficText.content = joinLines([new StyledText(rateChunks), new StyledText(counterChunks)]);
+    const trafficLines = [new StyledText(rateChunks)];
+    if (rate.detail) trafficLines.push(new StyledText([dim(rate.detail)]));
+    trafficLines.push(new StyledText(counterChunks));
+    trafficText.content = joinLines(trafficLines);
+
+    const provChunks: TextChunk[] = [];
+    providers.forEach((p, i) => {
+      if (i > 0) provChunks.push(SPACE, SPACE);
+      const a = authCache.get(p.id);
+      const state = authDotState(a);
+      const dot = state === "ok" ? green("●") : state === "down" ? red("●") : dim("●");
+      provChunks.push(dot, dim(` ${p.id}`));
+    });
+    const metaLine = new StyledText([
+      dim(`${endpoint.url}  `),
+      endpoint.tunnel === "up" ? green("tunnel up") : yellow("no tunnel"),
+    ]);
+    const provLines = [new StyledText(provChunks), metaLine];
+    if (flash && now <= flash.until) {
+      provLines.push(new StyledText([(flash.level === "ok" ? green : yellow)(flash.text)]));
+    } else {
+      flash = null;
+    }
+    providersText.content = joinLines(provLines);
 
     renderer.requestRender();
   };
@@ -1110,9 +1291,22 @@ export async function runTui(): Promise<void> {
     setMode({ kind: "picker", state });
   };
 
-  const copyEndpoint = async (): Promise<void> => {
+  // `c` copies the focused row's request_id when a row is focused, else the
+  // endpoint — the context-sensitive copy.
+  const copyContext = async (): Promise<void> => {
+    const row = focusedRow();
+    if (row) {
+      const ok = await clipboard.copy(row.request_id);
+      return showFlash(ok ? "request_id copied ✓" : "copy failed — no clipboard", ok ? "ok" : "warn");
+    }
     const ok = await clipboard.copy(endpoint.url);
     showFlash(ok ? "copied ✓" : "copy failed — no clipboard", ok ? "ok" : "warn");
+  };
+
+  const navigate = (delta: number): void => {
+    streamState = moveFocus(streamState, delta, cachedRows.length);
+    renderHints();
+    render();
   };
 
   let dataTimer: ReturnType<typeof setInterval> | undefined;
@@ -1133,7 +1327,7 @@ export async function runTui(): Promise<void> {
   renderer.keyInput.on("keypress", (key: KeyEvent) => {
     if (key.ctrl && key.name === "c") return quit();
 
-    // Modal input modes: global keys are inert while an overlay is open.
+    // Picker is the only modal: global keys are inert while it is open.
     if (mode.kind === "picker") {
       const state = mode.state;
       switch (key.name) {
@@ -1147,43 +1341,47 @@ export async function runTui(): Promise<void> {
         case "escape":
           return setMode({ kind: "default" });
         default:
-          // Repeat-trigger advance: the old fast-cycling muscle memory.
           if (key.name === TRIGGER[state.kind]) {
             return setMode({ kind: "picker", state: movePicker(state, 1) });
           }
           return;
       }
     }
-    if (mode.kind === "error-detail") {
-      if (key.name === "escape" || key.name === "return") return setMode({ kind: "default" });
-      return;
-    }
 
     switch (key.name) {
+      case "up":
+        return navigate(-1);
+      case "down":
+        return navigate(1);
+      case "return":
+        streamState = toggleExpanded(streamState);
+        return render();
+      case "escape":
+        if (!streamState.following) {
+          streamState = resumeFollow(streamState);
+          renderHints();
+          return render();
+        }
+        return;
+      case "f":
+        filter = cycleFilter(filter);
+        streamState = initialStreamState();
+        renderHints();
+        return render();
       case "p":
         return openPickerFor("provider");
       case "m":
         return openPickerFor("model");
       case "e":
         return openPickerFor("effort");
-      case "w":
-        period = nextPeriod(period);
-        return render();
       case "c":
-        return void copyEndpoint();
+        return void copyContext();
       case "q":
         return quit();
-      case "return": {
-        const row = latestError(cachedRows);
-        if (!row) return showFlash("no recent error", "warn");
-        return setMode({ kind: "error-detail", row });
-      }
     }
   });
 
-  // Reflow immediately on terminal resize (Yoga relayouts the flex zones; this
-  // re-derives the size-dependent content — stream auto-fill/clip, the modal
-  // overlay, and the min-size guard — without waiting for the next poll).
+  // Reflow immediately on terminal resize.
   renderer.on("resize", () => {
     render();
     renderOverlay();
@@ -1196,17 +1394,15 @@ export async function runTui(): Promise<void> {
     sel = getSelection();
     render();
   }, DATA_POLL_MS);
-  // Animation tick advances the spinner + live elapsed of in-flight rows (and
-  // the in-flight frame title) only, re-rendering the stream from the cached
-  // rows (no store read) and only while something is actually pending — so a
-  // quiet panel does no work.
+  // Animation tick advances the spinner + live elapsed of in-flight rows only,
+  // re-rendering the stream from the cached rows (no store read) and only while
+  // something is actually pending — so a quiet panel does no work.
   renderTimer = setInterval(() => {
     if (!cachedRows.some((r) => r.status === "pending")) return;
     renderStream(streamInner().w, Date.now());
     renderer.requestRender();
   }, RENDER_TICK_MS);
-  // Auth refresh runs on a slower, decoupled cadence so authStatus() is not
-  // invoked several times a second.
+  // Auth refresh runs on a slower, decoupled cadence.
   authTimer = setInterval(() => {
     void refreshAuth();
   }, AUTH_REFRESH_MS);

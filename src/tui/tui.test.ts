@@ -9,20 +9,25 @@ import {
   clipColumns,
   commitPicker,
   countersView,
+  cycleFilter,
+  detailLines,
   emptyState,
-  errorDetailLines,
+  followSeparator,
   formatActivityTokens,
   formatAuthMeta,
   formatElapsed,
   formatEndpoint,
   formatResetCountdown,
   hintsFor,
+  initialStreamState,
   isTerminalTooSmall,
   keycapParts,
-  latestError,
+  layoutTier,
   MIN_COLS,
   MIN_ROWS,
+  moveFocus,
   movePicker,
+  onPoll,
   openPicker,
   optimisticReset,
   padColumns,
@@ -30,10 +35,12 @@ import {
   planUsageParts,
   preserveEffort,
   type ProviderCatalog,
+  resumeFollow,
+  SIDEBAR_MIN_COLS,
   slugLabel,
-  sparkline,
   spinnerFrame,
   statusCellText,
+  toggleExpanded,
   truncateDetail,
   usageLevel,
   wrapText,
@@ -184,58 +191,40 @@ test("formatActivityTokens is empty when no token counts were recorded", () => {
   ).toBe("");
 });
 
-// --- cache rate + sparkline ----------------------------------------------------
+// --- cache rate + counters -----------------------------------------------------
 
-test("sparkline maps 0–100% rates to block heights, one glyph per rate in order", () => {
-  expect(sparkline([0, 0.5, 1])).toBe("▁▅█");
-  expect(sparkline([0.12, 0.25, 0.37, 0.5, 0.62, 0.75, 0.87, 1])).toBe("▁▃▃▅▅▇▇█");
-});
-
-test("sparkline clamps out-of-range rates into the glyph scale", () => {
-  expect(sparkline([-0.5, 1.5])).toBe("▁█");
-  expect(sparkline([])).toBe("");
-});
-
-test("cacheRateView derives sparkline and aggregate from the same buckets", () => {
-  const view = cacheRateView([
-    { cached: 0, input: 100 }, // a cold stretch: a visible trough
-    { cached: 90, input: 100 },
-    { cached: 80, input: 100 },
-  ]);
-  expect(view.label).toBe("cache rate (all)");
-  expect(view.spark).toBe(sparkline([0, 0.9, 0.8]));
-  expect(view.value).toBe("57%"); // 170 / 300, aggregate over the same buckets
+test("cacheRateView derives the aggregate percent and detail from the all-time totals", () => {
+  const view = cacheRateView({ cached: 170, input: 300 });
+  expect(view.label).toBe("cache");
+  expect(view.value).toBe("57%"); // 170 / 300
   expect(view.detail).toBe("170 cached / 300 input");
 });
 
 test("cacheRateView abbreviates the detail counts like the rest of the panel", () => {
-  const view = cacheRateView([{ cached: 1200, input: 2700 }]);
+  const view = cacheRateView({ cached: 1200, input: 2700 });
   expect(view.value).toBe("44%");
   expect(view.detail).toBe("1.2k cached / 2.7k input");
 });
 
-test("cacheRateView renders 0% with no measured rows", () => {
-  expect(cacheRateView([])).toEqual({
-    label: "cache rate (all)",
-    spark: "",
+test("cacheRateView renders 0% with no measured input", () => {
+  expect(cacheRateView({ cached: 0, input: 0 })).toEqual({
+    label: "cache",
     value: "0%",
     detail: "",
   });
 });
 
-test("countersView renders requests, errors, and the window as label/value pairs", () => {
-  expect(countersView({ requests: 128, errors: 3 }, "24h")).toEqual([
+test("countersView renders requests and errors as label/value pairs (no window)", () => {
+  expect(countersView({ requests: 128, errors: 3 })).toEqual([
     { label: "requests", value: "128" },
     { label: "errors", value: "3" },
-    { label: "window", value: "24h" },
   ]);
 });
 
 test("countersView abbreviates large counts like the rest of the panel", () => {
-  expect(countersView({ requests: 12_000, errors: 0 }, "7d")).toEqual([
+  expect(countersView({ requests: 12_000, errors: 0 })).toEqual([
     { label: "requests", value: "12k" },
     { label: "errors", value: "0" },
-    { label: "window", value: "7d" },
   ]);
 });
 
@@ -438,17 +427,48 @@ test("clipColumns accounts for a wider column gap", () => {
 
 // --- footer hints --------------------------------------------------------------
 
-test("hintsFor lists the global keys in default mode, including copy", () => {
-  expect(hintsFor("default").map((h) => h.key)).toEqual(["p", "m", "e", "w", "c", "q"]);
+test("hintsFor lists the global keys in default mode, with move and filter", () => {
+  expect(hintsFor({ mode: "default", filter: "all" }).map((h) => h.key)).toEqual([
+    "↑↓",
+    "f",
+    "p",
+    "m",
+    "e",
+    "c",
+    "q",
+  ]);
 });
 
-test("hintsFor swaps to the modal controls while a picker or the error detail is open", () => {
-  expect(hintsFor("picker")).toEqual([
+test("hintsFor adds the detail key and 'copy id' when a row is focused", () => {
+  const hints = hintsFor({ mode: "default", focused: true, filter: "errors" });
+  expect(hints.find((h) => h.key === "⏎")).toEqual({ key: "⏎", label: "detail" });
+  expect(hints.find((h) => h.key === "c")).toEqual({ key: "c", label: "copy id" });
+  expect(hints.find((h) => h.key === "f")).toEqual({ key: "f", label: "filter errors" });
+});
+
+test("hintsFor surfaces the resume key when follow is paused", () => {
+  const hints = hintsFor({ mode: "default", paused: true, filter: "all" });
+  expect(hints[0]).toEqual({ key: "esc", label: "resume" });
+});
+
+test("hintsFor swaps to the modal controls while a picker is open", () => {
+  expect(hintsFor({ mode: "picker" })).toEqual([
     { key: "↑↓", label: "move" },
     { key: "⏎", label: "select" },
     { key: "esc", label: "cancel" },
   ]);
-  expect(hintsFor("error-detail")).toEqual([{ key: "esc", label: "close" }]);
+});
+
+test("cycleFilter rotates all → errors → pending → all", () => {
+  expect(cycleFilter("all")).toBe("errors");
+  expect(cycleFilter("errors")).toBe("pending");
+  expect(cycleFilter("pending")).toBe("all");
+});
+
+test("followSeparator carries the new-row count, or a plain marker at zero", () => {
+  expect(followSeparator(0)).toBe("── follow paused ──");
+  expect(followSeparator(38)).toBe("── follow paused · 38 new ──");
+  expect(followSeparator(1200)).toBe("── follow paused · 1.2k new ──");
 });
 
 test("keycapParts splits a hint into its highlighted keycap and dim remainder", () => {
@@ -562,18 +582,7 @@ test("pickerRows marks the highlight and the current choice independently", () =
   ]);
 });
 
-// --- error detail overlay --------------------------------------------------------
-
-test("latestError finds the most recent error in a newest-first window", () => {
-  const rows = [
-    { status: "ok" },
-    { status: "error", id: "newest-error" },
-    { status: "error", id: "older-error" },
-  ];
-  expect(latestError(rows)).toEqual({ status: "error", id: "newest-error" });
-  expect(latestError([{ status: "ok" }, { status: "pending" }])).toBeUndefined();
-  expect(latestError([])).toBeUndefined();
-});
+// --- inline row detail -----------------------------------------------------------
 
 test("wrapText wraps on word boundaries and hard-breaks oversized words", () => {
   expect(wrapText("upstream 529 overloaded", 12)).toEqual(["upstream 529", "overloaded"]);
@@ -582,46 +591,110 @@ test("wrapText wraps on word boundaries and hard-breaks oversized words", () => 
   expect(wrapText("a\nb", 10)).toEqual(["a", "b"]); // explicit newlines preserved
 });
 
-test("errorDetailLines assembles header, request_id, and the full wrapped note", () => {
-  const row = {
-    ts: FROZEN,
-    provider: "claude",
-    model: "claude-sonnet-4-6",
-    duration_ms: 842,
-    note: "upstream 529 overloaded, retry later",
-    request_id: "req-abc123",
-  };
-  expect(errorDetailLines(row, "12:00:04", 20)).toEqual([
-    "12:00:04  claude/claude-sonnet-4-6  842ms",
-    "request_id req-abc123",
-    "",
+const detailRow = {
+  status: "ok",
+  effort: "medium",
+  duration_ms: 842 as number | null,
+  note: null as string | null,
+  request_id: "req-abc123",
+  prompt_tokens: 8142 as number | null,
+  completion_tokens: 412 as number | null,
+  cached_tokens: 7920 as number | null,
+  cache_creation: 0 as number | null,
+};
+
+test("detailLines shows the meta line and full token breakdown for an ok row", () => {
+  expect(detailLines(detailRow, 60)).toEqual([
+    "request_id req-abc123  ·  effort medium  ·  842ms",
+    "prompt 8142  ·  completion 412  ·  cached 7920  ·  wrote 0",
+  ]);
+});
+
+test("detailLines renders unmeasured token counts as em dashes", () => {
+  const bare = { ...detailRow, prompt_tokens: null, completion_tokens: null, cached_tokens: null, cache_creation: null };
+  expect(detailLines(bare, 60)[1]).toBe("prompt —  ·  completion —  ·  cached —  ·  wrote —");
+});
+
+test("detailLines wraps the full error note instead of the token breakdown", () => {
+  const err = { ...detailRow, status: "error", note: "upstream 529 overloaded, retry later", duration_ms: null };
+  expect(detailLines(err, 20)).toEqual([
+    "request_id req-abc123  ·  effort medium",
     "upstream 529",
     "overloaded, retry",
     "later",
   ]);
 });
 
-test("errorDetailLines copes with a missing duration and note", () => {
-  const row = { ts: FROZEN, provider: "claude", model: "m", duration_ms: null, note: null, request_id: "r1" };
-  expect(errorDetailLines(row, "12:00:04", 40)).toEqual([
-    "12:00:04  claude/m",
-    "request_id r1",
-    "",
-    "(no note recorded)",
-  ]);
+test("detailLines truncates a long error note with an ellipsis line on a short terminal", () => {
+  const err = { ...detailRow, status: "error", note: "one two three four five six", duration_ms: null };
+  const lines = detailLines(err, 5, 3);
+  expect(lines.slice(1)).toEqual(["one", "two", "…"]); // 2 note lines + ellipsis
 });
 
-test("errorDetailLines truncates the note with an ellipsis line on a short terminal", () => {
-  const row = {
-    ts: FROZEN,
-    provider: "claude",
-    model: "m",
-    duration_ms: null,
-    note: "one two three four five six",
-    request_id: "r1",
-  };
-  const lines = errorDetailLines(row, "12:00:04", 5, 3);
-  expect(lines.slice(3)).toEqual(["one", "two", "…"]); // 2 note lines + ellipsis
+// --- focus + follow state machine ------------------------------------------------
+
+test("initialStreamState follows the head with nothing focused", () => {
+  expect(initialStreamState()).toEqual({ focus: null, expanded: false, following: true, newWhilePaused: 0 });
+});
+
+test("moveFocus lands on the head from nothing, then clamps without wrapping", () => {
+  let s = initialStreamState();
+  s = moveFocus(s, 1, 5); // first move → head (index 0)
+  expect(s.focus).toBe(0);
+  expect(s.following).toBe(true); // still at the head
+  s = moveFocus(s, 1, 5); // away from head
+  expect(s.focus).toBe(1);
+  expect(s.following).toBe(false); // follow paused
+  s = moveFocus(s, -5, 5); // clamps at the head, resumes follow
+  expect(s.focus).toBe(0);
+  expect(s.following).toBe(true);
+  s = moveFocus(s, 99, 5); // clamps at the tail
+  expect(s.focus).toBe(4);
+});
+
+test("moveFocus collapses an open detail when the focus actually moves", () => {
+  let s = moveFocus(initialStreamState(), 1, 5); // focus head
+  s = toggleExpanded(s);
+  expect(s.expanded).toBe(true);
+  s = moveFocus(s, 1, 5);
+  expect(s.expanded).toBe(false);
+});
+
+test("moveFocus clears focus on an empty stream", () => {
+  expect(moveFocus(initialStreamState(), 1, 0)).toMatchObject({ focus: null, expanded: false });
+});
+
+test("toggleExpanded flips the focused detail and no-ops with nothing focused", () => {
+  expect(toggleExpanded(initialStreamState()).expanded).toBe(false); // no focus → unchanged
+  const focused = moveFocus(initialStreamState(), 1, 3);
+  expect(toggleExpanded(focused).expanded).toBe(true);
+  expect(toggleExpanded(toggleExpanded(focused)).expanded).toBe(false);
+});
+
+test("resumeFollow pins the head, clears the counter, and collapses detail", () => {
+  const paused = { focus: 4, expanded: true, following: false, newWhilePaused: 12 };
+  expect(resumeFollow(paused)).toEqual({ focus: 0, expanded: false, following: true, newWhilePaused: 0 });
+});
+
+test("onPoll keeps the focused row stable and counts new rows while paused", () => {
+  const paused = { focus: 2, expanded: false, following: false, newWhilePaused: 0 };
+  const after = onPoll(paused, 3, 20); // 3 rows arrived at the head
+  expect(after.focus).toBe(5); // shifted down by 3 to stay on the same row
+  expect(after.newWhilePaused).toBe(3);
+});
+
+test("onPoll is a no-op while following or with nothing focused", () => {
+  const following = initialStreamState();
+  expect(onPoll(following, 5, 20)).toBe(following);
+});
+
+// --- layout tier -----------------------------------------------------------------
+
+test("layoutTier switches to the sidebar at the threshold width", () => {
+  expect(layoutTier(SIDEBAR_MIN_COLS)).toBe("wide");
+  expect(layoutTier(SIDEBAR_MIN_COLS - 1)).toBe("compact");
+  expect(layoutTier(140)).toBe("wide");
+  expect(layoutTier(60)).toBe("compact");
 });
 
 // --- empty state -----------------------------------------------------------------

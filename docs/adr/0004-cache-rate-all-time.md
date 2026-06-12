@@ -4,9 +4,9 @@ Date: 2026-06-10
 
 ## Status
 
-Accepted. Supersedes [ADR-0003](./0003-cache-rate-request-count-window.md) (the
-request-count window). The request/error **counters** keep the time-windowed
-`w` period, unchanged since ADR-0002.
+Accepted, then amended by [ADR-0005](./0005-all-time-counters-no-sparkline.md)
+(the bucketed sparkline is dropped; the counters become all-time too). Supersedes
+[ADR-0003](./0003-cache-rate-request-count-window.md) (the request-count window).
 
 ## Context
 

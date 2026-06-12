@@ -1,5 +1,9 @@
 import { PORT, SENTINEL_MODEL } from "../config.ts";
+import { purgeExpiredActivity, sweepPendingActivity } from "../store/state.ts";
 import { dispatchChat } from "./dispatch.ts";
+
+/** How often the running service re-purges activity rows past retention. */
+const PURGE_INTERVAL_MS = 60 * 60 * 1000;
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -10,6 +14,16 @@ function json(data: unknown, status = 200): Response {
 
 /** Start the local OpenAI-compatible HTTP server bound to 127.0.0.1. */
 export function startServer() {
+  const swept = sweepPendingActivity();
+  if (swept > 0) {
+    console.log(`[shim] swept ${swept} pending activity row(s) left by a previous instance.`);
+  }
+  const purged = purgeExpiredActivity();
+  if (purged > 0) {
+    console.log(`[shim] purged ${purged} activity row(s) past the 7-day retention.`);
+  }
+  // The service can outlive the retention horizon, so re-purge periodically.
+  setInterval(() => purgeExpiredActivity(), PURGE_INTERVAL_MS);
   return Bun.serve({
     port: PORT,
     hostname: "127.0.0.1",

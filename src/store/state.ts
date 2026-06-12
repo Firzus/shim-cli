@@ -2,42 +2,6 @@ import type { Database } from "bun:sqlite";
 import { getDb } from "./db.ts";
 import type { Effort, ProviderId, Selection } from "../providers/types.ts";
 
-/** Selectable cache-rate windows, ordered for cycling in the TUI. */
-export const PERIODS = ["5h", "24h", "7d", "30d", "all"] as const;
-export type Period = (typeof PERIODS)[number];
-
-/** Counters window to 24h by default — recent enough to read the live signal. */
-export const DEFAULT_PERIOD: Period = "24h";
-
-/**
- * Fixed glyph count of the cache-rate sparkline: the whole measured history is
- * bucketed into this many equal-size buckets, one glyph per bucket. See ADR-0004.
- */
-export const CACHE_SPARK_BUCKETS = 20;
-
-const PERIOD_MS: Record<Exclude<Period, "all">, number> = {
-  "5h": 5 * 60 * 60 * 1000,
-  "24h": 24 * 60 * 60 * 1000,
-  "7d": 7 * 24 * 60 * 60 * 1000,
-  "30d": 30 * 24 * 60 * 60 * 1000,
-};
-
-/**
- * Epoch (ms) lower bound for a period window, given the current time. `all`
- * maps to 0 — no bound, the whole table. Pure: `now` is injected so callers
- * (and tests) control the reference point.
- */
-export function periodSince(period: Period, now: number): number {
-  if (period === "all") return 0;
-  return now - PERIOD_MS[period];
-}
-
-/** Next period in the cycle order, wrapping `all` back to `5h`. */
-export function nextPeriod(period: Period): Period {
-  const i = PERIODS.indexOf(period);
-  return PERIODS[(i + 1) % PERIODS.length] as Period;
-}
-
 /** Used the first time the store is opened with no selection yet. */
 export const DEFAULT_SELECTION: Selection = {
   provider: "claude",
@@ -136,66 +100,111 @@ export function finishActivity(
     });
 }
 
-export function recentActivity(limit = 50): ActivityRow[] {
-  return getDb()
-    .query("SELECT * FROM activity ORDER BY id DESC LIMIT $limit")
-    .all({ $limit: limit }) as ActivityRow[];
+/**
+ * Mark every `pending` row as errored. Call only from the server at startup:
+ * no request survives a process restart, so any row still pending belongs to a
+ * previous instance that died mid-stream and would otherwise count as
+ * in-flight forever. Returns the number of rows swept. `db` is injectable for
+ * tests.
+ */
+export function sweepPendingActivity(db: Database = getDb()): number {
+  const res = db
+    .query(
+      `UPDATE activity SET status = 'error', note = 'interrupted by server restart'
+         WHERE status = 'pending'`,
+    )
+    .run();
+  return Number(res.changes);
 }
 
-/** One sparkline bucket's cache sample: its summed cached + prompt token counts. */
-export interface CacheSample {
+/** Activity rows older than this are purged — the store keeps at most 7 days. */
+export const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Delete every activity row older than `RETENTION_MS`. The service runs this at
+ * startup and on a periodic timer, so the table never holds more than ~7 days
+ * of history (see ADR-0006). A `pending` row that old belongs to no live
+ * request and is purged like any other. The `activity_ts` index covers the
+ * predicate. Returns the number of rows purged. `db` is injectable for tests.
+ */
+export function purgeExpiredActivity(now: number = Date.now(), db: Database = getDb()): number {
+  const res = db
+    .query("DELETE FROM activity WHERE ts < $cutoff")
+    .run({ $cutoff: now - RETENTION_MS });
+  return Number(res.changes);
+}
+
+/** The status filter applied to an activity page, cycled by the `f` key in the TUI. */
+export type ActivityFilter = "all" | "errors" | "pending";
+
+/**
+ * One keyset page of activity rows, newest → oldest. `cursor` is the exclusive
+ * upper bound on `id` (rows with `id < cursor`); pass `undefined` for the first
+ * page (the newest rows). `filter` scopes by status: `all` (every row),
+ * `errors` (`status = 'error'`), or `pending` (`status = 'pending'`). Keyset
+ * pagination on the primary key needs no extra index and is stable as new rows
+ * arrive at the head. `db` is injectable for tests.
+ */
+export function activityPage(
+  limit: number,
+  cursor?: number,
+  filter: ActivityFilter = "all",
+  db: Database = getDb(),
+): ActivityRow[] {
+  const statusClause = filter === "errors" ? "AND status = 'error'" : filter === "pending" ? "AND status = 'pending'" : "";
+  const cursorClause = cursor != null ? "AND id < $cursor" : "";
+  return db
+    .query(
+      `SELECT * FROM activity
+        WHERE 1 = 1 ${cursorClause} ${statusClause}
+        ORDER BY id DESC LIMIT $limit`,
+    )
+    .all({ $limit: limit, ...(cursor != null ? { $cursor: cursor } : {}) }) as ActivityRow[];
+}
+
+/** The cache-rate inputs: summed cached + prompt tokens over all measured rows. */
+export interface CacheTotals {
   cached: number;
   input: number;
 }
 
 /**
- * The whole measured history, bucketed into at most `buckets` equal-size
- * buckets (NTILE over insertion order), returned oldest → newest — one row per
- * bucket, each carrying that bucket's summed token counts. A row is measured
- * only when both token columns are present; a NULL in either is *unmeasured* —
- * a pending request, or one recorded by an older build that never reported
- * cache tokens — and is excluded outright, not counted as a 0% miss that would
- * drag the rate down. This is the single store read behind the cache rate: the
- * TUI derives both the all-time aggregate rate (`Σcached / Σinput` — bucket
- * sums add up to the exact table-wide totals) and the bucketed sparkline from
- * the same result, so the two can never disagree. Aggregation happens in SQL —
- * the table grows unbounded and the TUI polls frequently, so the rows never
- * cross into JS. `db` is injectable for tests. See ADR-0004.
+ * Cache totals over the retained history: `Σcached_tokens / Σprompt_tokens`
+ * over every *measured* row (both token columns present). A NULL in either
+ * column is unmeasured — a pending request, or one recorded by an older build
+ * that never reported cache tokens — and is excluded outright, not counted as
+ * a 0% miss that would drag the rate down. The query stays unwindowed; the
+ * 7-day bound comes from retention purging old rows (ADR-0006). The
+ * aggregation runs in SQL (the TUI polls frequently). `db` is injectable for
+ * tests. See ADR-0004.
  */
-export function bucketedCacheSamples(
-  buckets = CACHE_SPARK_BUCKETS,
-  db: Database = getDb(),
-): CacheSample[] {
-  return db
+export function cacheTotals(db: Database = getDb()): CacheTotals {
+  const row = db
     .query(
-      `SELECT SUM(cached_tokens) AS cached, SUM(prompt_tokens) AS input
-         FROM (SELECT cached_tokens, prompt_tokens,
-                      NTILE($buckets) OVER (ORDER BY id) AS bucket
-                 FROM activity
-                WHERE cached_tokens IS NOT NULL AND prompt_tokens IS NOT NULL)
-        GROUP BY bucket ORDER BY bucket`,
+      `SELECT COALESCE(SUM(cached_tokens), 0) AS cached,
+              COALESCE(SUM(prompt_tokens), 0) AS input
+         FROM activity
+        WHERE cached_tokens IS NOT NULL AND prompt_tokens IS NOT NULL`,
     )
-    .all({ $buckets: buckets }) as CacheSample[];
+    .get() as CacheTotals;
+  return { cached: row.cached, input: row.input };
 }
 
 /**
- * Request + error counts over a bounded window — rows with `ts >= since`.
- * `requests` is every row in the window (all statuses); `errors` is the subset
- * with `status = 'error'`. The `w` period scopes these counters only; the cache
- * rate is all-time (see [[bucketedCacheSamples]]). Pass `since = 0` for
- * the whole table. `db` is injectable for tests against a temporary database.
+ * Request + error counts over the retained history. `requests` is every row;
+ * `errors` is the subset with `status = 'error'`. Neither the cache rate nor
+ * these counters carry a time window — the queries scan the whole table, and
+ * the 7-day bound comes from retention (ADR-0006). `db` is injectable for
+ * tests against a temporary database.
  */
-export function windowedCounters(
-  since = 0,
-  db: Database = getDb(),
-): { requests: number; errors: number } {
+export function activityCounters(db: Database = getDb()): { requests: number; errors: number } {
   const row = db
     .query(
       `SELECT COUNT(*) AS requests,
               COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) AS errors
-         FROM activity WHERE ts >= $since`,
+         FROM activity`,
     )
-    .get({ $since: since }) as { requests: number; errors: number };
+    .get() as { requests: number; errors: number };
   return { requests: row.requests, errors: row.errors };
 }
 
