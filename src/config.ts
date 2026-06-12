@@ -28,4 +28,4 @@ export const TUNNEL_TOKEN = process.env.CLOUDFLARE_TUNNEL_TOKEN ?? "";
 export const TUNNEL_HOSTNAME = process.env.CLOUDFLARE_TUNNEL_HOSTNAME ?? "";
 
 /** The single sentinel model id exposed to Cursor. */
-export const SENTINEL_MODEL = "shim";
+export const SENTINEL_MODEL = "Cursor";

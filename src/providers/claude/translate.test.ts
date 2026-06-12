@@ -4,7 +4,7 @@ import { collectText, parseOpenAIChunks, sseStream as anthropicSSE } from "../te
 
 test("injects the Claude Code identity as the first system block, Cursor's system second", () => {
   const body = {
-    model: "shim",
+    model: "Cursor",
     stream: true,
     messages: [
       { role: "system", content: "You are a coding assistant." },
@@ -27,19 +27,19 @@ test("the cache breakpoint carries the configured TTL, defaulting to 1h (issue #
   expect(CACHE_CONTROL).toEqual({ type: "ephemeral", ttl: "1h" });
 });
 
-test("maps effort to adaptive thinking + output_config.effort, clamping 'extra' per model", () => {
+test("maps effort to adaptive thinking + output_config.effort, clamping 'xhigh' per model", () => {
   const body = { messages: [{ role: "user", content: "hi" }] };
 
   const sonnetHigh = buildAnthropicRequest(body, { model: "claude-sonnet-4-6", effort: "high" });
   expect(sonnetHigh.thinking).toEqual({ type: "adaptive", display: "summarized" });
   expect(sonnetHigh.output_config).toEqual({ effort: "high" });
 
-  // 'extra' clamps differently: fable/opus accept xhigh, sonnet rejects xhigh but accepts max.
-  const fableExtra = buildAnthropicRequest(body, { model: "claude-fable-5", effort: "extra" });
+  // 'xhigh' clamps differently: fable/opus accept xhigh, sonnet rejects xhigh but accepts max.
+  const fableExtra = buildAnthropicRequest(body, { model: "claude-fable-5", effort: "xhigh" });
   expect(fableExtra.output_config).toEqual({ effort: "xhigh" });
-  const opusExtra = buildAnthropicRequest(body, { model: "claude-opus-4-8", effort: "extra" });
+  const opusExtra = buildAnthropicRequest(body, { model: "claude-opus-4-8", effort: "xhigh" });
   expect(opusExtra.output_config).toEqual({ effort: "xhigh" });
-  const sonnetExtra = buildAnthropicRequest(body, { model: "claude-sonnet-4-6", effort: "extra" });
+  const sonnetExtra = buildAnthropicRequest(body, { model: "claude-sonnet-4-6", effort: "xhigh" });
   expect(sonnetExtra.output_config).toEqual({ effort: "max" });
 });
 
@@ -316,7 +316,12 @@ test("emits a final usage chunk from Anthropic input/output tokens and reports u
     await collectText(anthropicStreamToOpenAI(upstream, { model: "claude-sonnet-4-6", report: (u) => { reported = u; } })),
   );
   const usageChunk = chunks.find((c) => c.usage);
-  expect(usageChunk?.usage).toEqual({ prompt_tokens: 42, completion_tokens: 17, total_tokens: 59 });
+  expect(usageChunk?.usage).toEqual({
+    prompt_tokens: 42,
+    completion_tokens: 17,
+    total_tokens: 59,
+    prompt_tokens_details: { cached_tokens: 0 },
+  });
   expect(reported).toEqual({ promptTokens: 42, completionTokens: 17, cachedTokens: 0, cacheCreationTokens: 0 });
 });
 
@@ -350,7 +355,12 @@ test("normalizes the prompt total to include cache for both the Cursor chunk and
   // The chunk streamed to Cursor uses the full input (OpenAI semantics):
   // prompt total = input + cache_read + cache_creation = 150.
   const usageChunk = chunks.find((c) => c.usage);
-  expect(usageChunk?.usage).toEqual({ prompt_tokens: 150, completion_tokens: 17, total_tokens: 167 });
+  expect(usageChunk?.usage).toEqual({
+    prompt_tokens: 150,
+    completion_tokens: 17,
+    total_tokens: 167,
+    prompt_tokens_details: { cached_tokens: 100 },
+  });
   // The store report uses the same normalized prompt total, and surfaces the
   // cold-write count (cache_creation) separately from the cache reads.
   expect(reported).toEqual({ promptTokens: 150, completionTokens: 17, cachedTokens: 100, cacheCreationTokens: 8 });

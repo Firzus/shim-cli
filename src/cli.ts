@@ -61,12 +61,12 @@ async function serve(): Promise<void> {
       ? pc.green("connected")
       : pc.yellow("connecting…")
     : pc.yellow("disabled");
-  console.log(pc.bold(pc.cyan("shim")) + pc.dim(" proxy running"));
+  console.log(pc.bold(pc.cyan("cursor-relay")) + pc.dim(" proxy running"));
   console.log(`  ${pc.dim("Cursor Base URL")}  ${base}`);
   console.log(`  ${pc.dim("Cursor model")}     ${SENTINEL_MODEL}`);
   console.log(`  ${pc.dim("local")}            http://127.0.0.1:${PORT}`);
   console.log(`  ${pc.dim("tunnel")}           ${tunnelBadge}`);
-  console.log(pc.dim("\n  Run `shim` in another terminal to open the control panel."));
+  console.log(pc.dim("\n  Run `cursor-relay` in another terminal to open the control panel."));
 }
 
 async function status(): Promise<void> {
@@ -87,9 +87,9 @@ async function status(): Promise<void> {
 }
 
 function printHelp(): void {
-  console.log(`shim - multi-provider (Codex + Claude) OpenAI-compatible proxy for Cursor
+  console.log(`cursor-relay - multi-provider (Codex + Claude) OpenAI-compatible proxy for Cursor
 
-Usage: shim [command]
+Usage: cursor-relay [command]
 
 Commands:
   (default)  Open the TUI control panel (switch provider/model/effort, watch activity)

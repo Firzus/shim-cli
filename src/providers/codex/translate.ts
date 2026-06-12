@@ -12,7 +12,7 @@ const EFFORT_MAP: Record<Effort, string> = {
   low: "low",
   medium: "medium",
   high: "high",
-  extra: "xhigh",
+  xhigh: "xhigh",
 };
 
 export interface CodexOptions {
@@ -28,6 +28,8 @@ export interface ResponsesBody {
   store: false;
   reasoning?: { effort: string };
   tools?: unknown[];
+  prompt_cache_key?: string;
+  prompt_cache_retention?: "24h";
 }
 
 export function buildResponsesRequest(
@@ -83,6 +85,8 @@ export function buildResponsesRequest(
     stream: true,
     store: false,
     reasoning: { effort: EFFORT_MAP[opts.effort] },
+    prompt_cache_key: `cursor-relay:codex:${opts.model}`,
+    prompt_cache_retention: "24h",
   };
   const tools = mapTools(body.tools);
   if (tools) req.tools = tools;
@@ -103,6 +107,7 @@ function mapTools(tools: unknown): unknown[] | undefined {
       parameters: fn.parameters ?? fn.input_schema ?? { type: "object", properties: {} },
     });
   }
+  out.sort((a, b) => ((a.name as string) < (b.name as string) ? -1 : (a.name as string) > (b.name as string) ? 1 : 0));
   return out.length ? out : undefined;
 }
 
@@ -236,6 +241,7 @@ export function responsesStreamToOpenAI(
             prompt_tokens: finalUsage.prompt_tokens,
             completion_tokens: finalUsage.completion_tokens,
             total_tokens: finalUsage.total_tokens,
+            prompt_tokens_details: { cached_tokens: finalUsage.cached_tokens },
           };
           controller.enqueue(enc.encode(sse({ id, object: "chat.completion.chunk", created, model: opts.model, choices: [], usage })));
           opts.report?.({
@@ -248,7 +254,7 @@ export function responsesStreamToOpenAI(
         controller.close();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        emit({ content: `\n\n[shim] stream error: ${message}` }, "stop");
+        emit({ content: `\n\n[cursor-relay] stream error: ${message}` }, "stop");
         controller.enqueue(enc.encode(SSE_DONE));
         controller.close();
       }

@@ -3,7 +3,7 @@
 const RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const ORIGINATOR = "codex_cli_rs";
 const VERSION = "0.150.0";
-const USER_AGENT = `codex_cli_rs/${VERSION} (shim-cli)`;
+const USER_AGENT = `codex_cli_rs/${VERSION} (cursor-relay)`;
 
 export function buildHeaders(
   accessToken: string,

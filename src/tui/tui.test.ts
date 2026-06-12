@@ -483,8 +483,8 @@ const CATALOG: ProviderCatalog = [
   {
     id: "claude",
     models: [
-      { id: "claude-fable-5", label: "Fable 5", efforts: ["low", "medium", "high", "extra"] },
-      { id: "claude-opus-4-8", label: "Opus 4.8", efforts: ["low", "medium", "high", "extra"] },
+      { id: "claude-fable-5", label: "Fable 5", efforts: ["low", "medium", "high", "xhigh"] },
+      { id: "claude-opus-4-8", label: "Opus 4.8", efforts: ["low", "medium", "high", "xhigh"] },
     ],
   },
   {
@@ -516,7 +516,7 @@ test("openPicker lists the active provider's models by short label", () => {
 
 test("openPicker lists the active model's efforts", () => {
   const picker = openPicker("effort", SEL, CATALOG)!;
-  expect(picker.options.map((o) => o.id)).toEqual(["low", "medium", "high", "extra"]);
+  expect(picker.options.map((o) => o.id)).toEqual(["low", "medium", "high", "xhigh"]);
   expect(picker.currentIndex).toBe(1);
 });
 

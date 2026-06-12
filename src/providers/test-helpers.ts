@@ -27,7 +27,12 @@ export async function collectText(stream: ReadableStream<Uint8Array>): Promise<s
 
 export interface OpenAIChunk {
   choices?: Array<{ delta?: Record<string, unknown>; finish_reason?: string | null }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
 }
 
 /** Parse an OpenAI chat.completion.chunk SSE transcript into its JSON chunks. */

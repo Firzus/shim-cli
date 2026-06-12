@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues and PRDs are tracked as GitHub issues (`Firzus/shim-cli`) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues and PRDs are tracked as GitHub issues (`Firzus/cursor-relay`) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

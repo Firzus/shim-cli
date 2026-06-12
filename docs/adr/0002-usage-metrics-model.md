@@ -8,7 +8,7 @@ Accepted
 
 ## Context
 
-shim-cli surfaced a single "Session cache rate" that summed `cached_tokens / prompt_tokens` over the **entire** `activity` table (`cacheTotals()`), with no time bound. The result reads ~0% indefinitely: cold first-turn requests and any pre-cache traffic stay in the denominator forever, burying the live signal. It also conflated two different questions into one number.
+cursor-relay surfaced a single "Session cache rate" that summed `cached_tokens / prompt_tokens` over the **entire** `activity` table (`cacheTotals()`), with no time bound. The result reads ~0% indefinitely: cold first-turn requests and any pre-cache traffic stay in the denominator forever, burying the live signal. It also conflated two different questions into one number.
 
 Two predecessor tools solved this and are the references:
 

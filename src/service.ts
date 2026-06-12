@@ -3,11 +3,11 @@ import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PORT } from "./config.ts";
-import { LOG_FILE, SHIM_DIR } from "./paths.ts";
+import { CURSOR_RELAY_DIR, LOG_FILE, migrateLegacyRuntimeState } from "./paths.ts";
 
 /**
- * Windows scheduled-task integration: run `shim serve` at logon in the
- * background. The TUI (`shim`) attaches separately and controls the running
+ * Windows scheduled-task integration: run `cursor-relay serve` at logon in the
+ * background. The TUI (`cursor-relay`) attaches separately and controls the running
  * service through the shared sqlite store.
  *
  * The task launches a hidden `.vbs` → `runner.cmd` chain rather than bun
@@ -16,9 +16,10 @@ import { LOG_FILE, SHIM_DIR } from "./paths.ts";
  * (3) runs with no visible console window.
  */
 
-const TASK_NAME = "ShimCliProxy";
-const RUNNER_CMD = join(SHIM_DIR, "runner.cmd");
-const LAUNCHER_VBS = join(SHIM_DIR, "launcher.vbs");
+const TASK_NAME = "CursorRelayProxy";
+const LEGACY_TASK_NAME = "ShimCliProxy";
+const RUNNER_CMD = join(CURSOR_RELAY_DIR, "runner.cmd");
+const LAUNCHER_VBS = join(CURSOR_RELAY_DIR, "launcher.vbs");
 
 /** PID from the port-probe output, or null when free / invalid / self / a system pid. Pure. */
 export function parsePortOwnerPid(raw: string, selfPid: number): number | null {
@@ -49,10 +50,10 @@ export function killPortOwner(port = PORT): void {
   if (pid == null) return;
   const kill = spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { encoding: "utf8" });
   if (kill.status === 0) {
-    console.log(`[shim] killed stale server process tree on port ${port} (pid ${pid}).`);
+    console.log(`[cursor-relay] killed stale server process tree on port ${port} (pid ${pid}).`);
   } else {
     console.log(
-      `[shim] could not kill pid ${pid} on port ${port}: ${trimOutput(kill.stderr || kill.stdout || "unknown error")}`,
+      `[cursor-relay] could not kill pid ${pid} on port ${port}: ${trimOutput(kill.stderr || kill.stdout || "unknown error")}`,
     );
   }
 }
@@ -61,7 +62,9 @@ export async function installService(): Promise<void> {
   if (process.platform !== "win32") {
     throw new Error("service install is Windows-only");
   }
-  await mkdir(SHIM_DIR, { recursive: true });
+  migrateLegacyRuntimeState();
+  await mkdir(CURSOR_RELAY_DIR, { recursive: true });
+  removeScheduledTask(LEGACY_TASK_NAME);
 
   const bunPath = process.execPath;
   const entry = fileURLToPath(new URL("./index.ts", import.meta.url));
@@ -94,15 +97,15 @@ export async function installService(): Promise<void> {
   killPortOwner();
   const run = spawnSync("schtasks", ["/Run", "/TN", TASK_NAME], { encoding: "utf8" });
   console.log(
-    `[shim] scheduled task "${TASK_NAME}" installed (auto-start at logon). Logs: ${LOG_FILE}`,
+    `[cursor-relay] scheduled task "${TASK_NAME}" installed (auto-start at logon). Logs: ${LOG_FILE}`,
   );
   if (run.status === 0) {
-    console.log("[shim] service started now (running in the background).");
+    console.log("[cursor-relay] service started now (running in the background).");
   } else {
     console.log(
-      `[shim] task created but failed to start now: ${trimOutput(run.stderr || run.stdout || "unknown error")}`,
+      `[cursor-relay] task created but failed to start now: ${trimOutput(run.stderr || run.stdout || "unknown error")}`,
     );
-    console.log(`[shim] it will start on next logon, or run: schtasks /Run /TN ${TASK_NAME}`);
+    console.log(`[cursor-relay] it will start on next logon, or run: schtasks /Run /TN ${TASK_NAME}`);
   }
 }
 
@@ -111,22 +114,34 @@ export async function uninstallService(): Promise<void> {
     throw new Error("service uninstall is Windows-only");
   }
   spawnSync("schtasks", ["/End", "/TN", TASK_NAME], { encoding: "utf8" });
+  spawnSync("schtasks", ["/End", "/TN", LEGACY_TASK_NAME], { encoding: "utf8" });
   // `/End` stops the launcher chain only; the bun server survives as an orphan.
   killPortOwner();
-  const del = spawnSync("schtasks", ["/Delete", "/TN", TASK_NAME, "/F"], { encoding: "utf8" });
-  if (del.status !== 0) {
-    const out = (del.stderr || del.stdout || "").toLowerCase();
-    const notFound =
-      out.includes("does not exist") ||
-      out.includes("cannot find") ||
-      out.includes("the system cannot find");
-    if (!notFound) {
-      throw new Error(formatSchtasksError("/Delete", del.stderr || del.stdout));
-    }
-  }
+  deleteScheduledTaskOrThrow(TASK_NAME);
+  removeScheduledTask(LEGACY_TASK_NAME);
   await safeUnlink(LAUNCHER_VBS);
   await safeUnlink(RUNNER_CMD);
-  console.log(`[shim] scheduled task "${TASK_NAME}" removed.`);
+  console.log(`[cursor-relay] scheduled task "${TASK_NAME}" removed.`);
+}
+
+function removeScheduledTask(taskName: string): void {
+  spawnSync("schtasks", ["/End", "/TN", taskName], { encoding: "utf8" });
+  const del = spawnSync("schtasks", ["/Delete", "/TN", taskName, "/F"], { encoding: "utf8" });
+  if (del.status === 0 || isTaskNotFound(del.stderr || del.stdout)) return;
+  console.log(
+    `[cursor-relay] could not remove legacy scheduled task "${taskName}": ${trimOutput(del.stderr || del.stdout || "unknown error")}`,
+  );
+}
+
+function deleteScheduledTaskOrThrow(taskName: string): void {
+  const del = spawnSync("schtasks", ["/Delete", "/TN", taskName, "/F"], { encoding: "utf8" });
+  if (del.status === 0 || isTaskNotFound(del.stderr || del.stdout)) return;
+  throw new Error(formatSchtasksError("/Delete", del.stderr || del.stdout));
+}
+
+function isTaskNotFound(raw: string): boolean {
+  const out = raw.toLowerCase();
+  return out.includes("does not exist") || out.includes("cannot find") || out.includes("the system cannot find");
 }
 
 async function safeUnlink(path: string): Promise<void> {

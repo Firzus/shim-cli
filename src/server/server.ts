@@ -16,11 +16,11 @@ function json(data: unknown, status = 200): Response {
 export function startServer() {
   const swept = sweepPendingActivity();
   if (swept > 0) {
-    console.log(`[shim] swept ${swept} pending activity row(s) left by a previous instance.`);
+    console.log(`[cursor-relay] swept ${swept} pending activity row(s) left by a previous instance.`);
   }
   const purged = purgeExpiredActivity();
   if (purged > 0) {
-    console.log(`[shim] purged ${purged} activity row(s) past the 7-day retention.`);
+    console.log(`[cursor-relay] purged ${purged} activity row(s) past the 7-day retention.`);
   }
   // The service can outlive the retention horizon, so re-purge periodically.
   setInterval(() => purgeExpiredActivity(), PURGE_INTERVAL_MS);
@@ -39,7 +39,7 @@ export function startServer() {
       if (req.method === "GET" && url.pathname === "/v1/models") {
         return json({
           object: "list",
-          data: [{ id: SENTINEL_MODEL, object: "model", created: 0, owned_by: "shim" }],
+          data: [{ id: SENTINEL_MODEL, object: "model", created: 0, owned_by: "cursor-relay" }],
         });
       }
 

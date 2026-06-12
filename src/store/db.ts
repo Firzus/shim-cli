@@ -1,13 +1,12 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
-import { DB_PATH, SHIM_DIR } from "../paths.ts";
+import { DB_PATH, migrateLegacyRuntimeState } from "../paths.ts";
 
 let db: Database | null = null;
 
 /** Open (and migrate) the shared sqlite store. Idempotent; cached per process. */
 export function getDb(): Database {
   if (db) return db;
-  mkdirSync(SHIM_DIR, { recursive: true });
+  migrateLegacyRuntimeState();
   const d = new Database(DB_PATH, { create: true });
   // WAL lets the service and the TUI read/write concurrently without locking.
   d.exec("PRAGMA journal_mode = WAL;");

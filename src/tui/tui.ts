@@ -1183,7 +1183,7 @@ export async function runTui(): Promise<void> {
 
     // header: active selection, the control anchor (accent values, dim labels).
     selText.content = new StyledText([
-      bold(cyan("shim")),
+      bold(cyan("cursor-relay")),
       dim("  provider "),
       bold(cyan(sel.provider)),
       dim("  model "),

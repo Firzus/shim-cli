@@ -15,9 +15,9 @@ import { recordPlanUsage } from "../../store/state.ts";
  */
 
 const MODELS: readonly ProviderModel[] = [
-  { id: "claude-fable-5", label: "Fable 5", efforts: ["low", "medium", "high", "extra"] },
-  { id: "claude-opus-4-8", label: "Opus 4.8", efforts: ["low", "medium", "high", "extra"] },
-  { id: "claude-sonnet-4-6", label: "Sonnet 4.6", efforts: ["low", "medium", "high", "extra"] },
+  { id: "claude-fable-5", label: "Fable 5", efforts: ["low", "medium", "high", "xhigh"] },
+  { id: "claude-opus-4-8", label: "Opus 4.8", efforts: ["low", "medium", "high", "xhigh"] },
+  { id: "claude-sonnet-4-6", label: "Sonnet 4.6", efforts: ["low", "medium", "high", "xhigh"] },
 ];
 
 export const claudeProvider: Provider = {

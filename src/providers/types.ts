@@ -8,9 +8,9 @@
 
 export type ProviderId = "claude" | "codex";
 
-export type Effort = "low" | "medium" | "high" | "extra";
+export type Effort = "low" | "medium" | "high" | "xhigh";
 
-export const EFFORTS: readonly Effort[] = ["low", "medium", "high", "extra"] as const;
+export const EFFORTS: readonly Effort[] = ["low", "medium", "high", "xhigh"] as const;
 
 /** The single mutable piece of state, shared via the store between TUI and service. */
 export interface Selection {

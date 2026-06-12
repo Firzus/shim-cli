@@ -31,13 +31,13 @@ export interface TunnelHandle {
 export async function openTunnel(): Promise<TunnelHandle> {
   if (!TUNNEL_TOKEN) {
     console.warn(
-      "[shim] CLOUDFLARE_TUNNEL_TOKEN not set — tunnel disabled. The server is localhost-only and Cursor's cloud cannot reach it.",
+      "[cursor-relay] CLOUDFLARE_TUNNEL_TOKEN not set — tunnel disabled. The server is localhost-only and Cursor's cloud cannot reach it.",
     );
     return { url: null, connected: false, async close() {} };
   }
 
   if (!existsSync(bin)) {
-    console.log("[shim] installing cloudflared binary (first run, ~25 MB)…");
+    console.log("[cursor-relay] installing cloudflared binary (first run, ~25 MB)…");
     await install(bin);
   }
 
@@ -66,7 +66,7 @@ export async function openTunnel(): Promise<TunnelHandle> {
     }
     // An "error" event with no listener crashes the whole process, taking the
     // healthy local proxy with it. Always absorb it; "exit" drives reconnection.
-    instance.on("error", (err: Error) => console.warn(`[shim] cloudflared error: ${err.message}`));
+    instance.on("error", (err: Error) => console.warn(`[cursor-relay] cloudflared error: ${err.message}`));
     instance.on("connected", () => {
       if (state !== "closed") state = "connected";
       signalFirstConnect();
@@ -74,7 +74,7 @@ export async function openTunnel(): Promise<TunnelHandle> {
     instance.once("exit", () => {
       if (state === "closed") return;
       state = "connecting";
-      console.warn("[shim] cloudflared exited; reconnecting…");
+      console.warn("[cursor-relay] cloudflared exited; reconnecting…");
       scheduleReconnect();
     });
     cf = instance;
@@ -96,7 +96,7 @@ export async function openTunnel(): Promise<TunnelHandle> {
   await waitOrTimeout(firstConnect, TUNNEL_READY_TIMEOUT_MS);
   if (!isConnected()) {
     console.warn(
-      `[shim] tunnel not connected within ${TUNNEL_READY_TIMEOUT_MS / 1000}s — ` +
+      `[cursor-relay] tunnel not connected within ${TUNNEL_READY_TIMEOUT_MS / 1000}s — ` +
         "retrying in the background; the local proxy stays up.",
     );
   }

@@ -59,7 +59,7 @@ export async function dispatchChat(
     const message = err instanceof Error ? err.message : String(err);
     finalize("error", message);
     // Surface the error to Cursor as a normal stream so it renders inline.
-    return new Response(openAiTextStream(selection.model, `[shim] upstream error: ${message}`), {
+    return new Response(openAiTextStream(selection.model, `[cursor-relay] upstream error: ${message}`), {
       headers: SSE_HEADERS,
     });
   }

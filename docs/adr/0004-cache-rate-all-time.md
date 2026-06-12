@@ -20,7 +20,7 @@ whole stored period, and that is the number the operator compares against. A
 spotting one cold write, useless for seeing how efficiency evolved across
 sessions. (Issue #45.)
 
-In shim-cli `prompt_tokens` is already normalized to the full input (raw input
+In cursor-relay `prompt_tokens` is already normalized to the full input (raw input
 + cache read + cache creation), so the reference formula reduces to
 `SUM(cached_tokens) / SUM(prompt_tokens)` over every measured row.
 

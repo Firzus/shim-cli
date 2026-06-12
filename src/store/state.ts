@@ -17,7 +17,11 @@ export function getSelection(): Selection {
     setSelection(DEFAULT_SELECTION);
     return { ...DEFAULT_SELECTION };
   }
-  return { provider: row.provider as ProviderId, model: row.model, effort: row.effort as Effort };
+  return { provider: row.provider as ProviderId, model: row.model, effort: normalizeEffort(row.effort) };
+}
+
+function normalizeEffort(effort: string): Effort {
+  return effort === "extra" ? "xhigh" : (effort as Effort);
 }
 
 export function setSelection(sel: Selection): void {

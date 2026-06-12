@@ -3,8 +3,8 @@ import { claudeProvider } from "./index.ts";
 import type { ChatContext } from "../types.ts";
 
 // Real network test against Anthropic using the local Claude Code OAuth token.
-// Skipped unless SHIM_E2E=1 so it does not run on every `bun test`.
-const e2e = process.env.SHIM_E2E === "1" ? test : test.skip;
+// Skipped unless CURSOR_RELAY_E2E=1 so it does not run on every `bun test`.
+const e2e = process.env.CURSOR_RELAY_E2E === "1" ? test : test.skip;
 
 async function collect(stream: ReadableStream<Uint8Array>): Promise<string> {
   const reader = stream.getReader();
@@ -23,7 +23,7 @@ e2e("streams a real Claude response as OpenAI chunks with usage", async () => {
   const ctx: ChatContext = {
     selection: { provider: "claude", model: "claude-sonnet-4-6", effort: "low" },
     body: {
-      model: "shim",
+      model: "Cursor",
       stream: true,
       messages: [
         { role: "system", content: "You are a helpful assistant." },

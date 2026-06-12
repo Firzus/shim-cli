@@ -1,6 +1,6 @@
 /** Read a response body as text without throwing, capped at `limit` chars. */
 export async function safeResponseText(
-  res: Response,
+  res: { text(): Promise<string> },
   opts: { limit: number; fallback: string },
 ): Promise<string> {
   try {

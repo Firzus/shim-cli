@@ -1,11 +1,11 @@
 {
-  "name": "shim-cli",
+  "name": "cursor-relay",
   "version": "0.1.0",
   "description": "Multi-provider (Codex + Claude) OpenAI-compatible proxy for Cursor BYOK, with a TUI control panel.",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "shim": "./src/index.ts"
+    "cursor-relay": "./src/index.ts"
   },
   "scripts": {
     "start": "bun run src/index.ts",

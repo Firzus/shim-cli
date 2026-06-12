@@ -187,7 +187,7 @@ export function mapThinking(
 }
 
 function mapEffort(model: string, effort: Effort): string {
-  if (effort !== "extra") return effort; // low/medium/high pass through unchanged
+  if (effort !== "xhigh") return effort; // low/medium/high pass through unchanged
   if (model.includes("fable")) return "xhigh"; // fable supports xhigh and max; xhigh is the agentic sweet spot
   if (model.includes("opus")) return "xhigh"; // opus-only top tier
   if (model.includes("sonnet")) return "max"; // sonnet rejects xhigh, accepts max
@@ -318,6 +318,7 @@ export function anthropicStreamToOpenAI(
             prompt_tokens: promptTokens,
             completion_tokens: outputTokens,
             total_tokens: promptTokens + outputTokens,
+            prompt_tokens_details: { cached_tokens: cacheReadTokens },
           },
         };
         controller.enqueue(enc.encode(sse(usageChunk)));
@@ -331,7 +332,7 @@ export function anthropicStreamToOpenAI(
         controller.close();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        emit({ content: `\n\n[shim] stream error: ${message}` }, "stop");
+        emit({ content: `\n\n[cursor-relay] stream error: ${message}` }, "stop");
         controller.enqueue(enc.encode(SSE_DONE));
         controller.close();
       }

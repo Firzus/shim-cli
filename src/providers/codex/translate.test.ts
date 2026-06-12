@@ -3,7 +3,7 @@ import { buildResponsesRequest } from "./translate.ts";
 
 test("maps system to instructions, messages to input[], and effort to reasoning", () => {
   const body = {
-    model: "shim",
+    model: "Cursor",
     stream: true,
     messages: [
       { role: "system", content: "be terse" },
@@ -14,6 +14,8 @@ test("maps system to instructions, messages to input[], and effort to reasoning"
   expect(out.model).toBe("gpt-5.4");
   expect(out.instructions).toBe("be terse");
   expect(out.reasoning).toEqual({ effort: "high" });
+  expect(out.prompt_cache_key).toBe("cursor-relay:codex:gpt-5.4");
+  expect(out.prompt_cache_retention).toBe("24h");
   expect(out.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "hi" }] }]);
   expect(out.stream).toBe(true);
   expect(out.store).toBe(false);
@@ -22,10 +24,16 @@ test("maps system to instructions, messages to input[], and effort to reasoning"
 test("converts nested OpenAI tools to flat Responses function tools", () => {
   const body = {
     messages: [{ role: "user", content: "hi" }],
-    tools: [{ type: "function", function: { name: "Glob", description: "find", parameters: { type: "object", properties: {} } } }],
+    tools: [
+      { type: "function", function: { name: "Read", description: "read", parameters: { type: "object", properties: {} } } },
+      { type: "function", function: { name: "Glob", description: "find", parameters: { type: "object", properties: {} } } },
+    ],
   };
   const out = buildResponsesRequest(body, { model: "gpt-5.4", effort: "low" });
-  expect(out.tools).toEqual([{ type: "function", name: "Glob", description: "find", parameters: { type: "object", properties: {} } }]);
+  expect(out.tools).toEqual([
+    { type: "function", name: "Glob", description: "find", parameters: { type: "object", properties: {} } },
+    { type: "function", name: "Read", description: "read", parameters: { type: "object", properties: {} } },
+  ]);
 });
 
 test("maps assistant tool_calls to function_call and tool results to function_call_output", () => {
@@ -60,7 +68,12 @@ test("translates Responses output_text deltas to OpenAI content chunks with usag
   const content = chunks.flatMap((c) => (typeof c.choices?.[0]?.delta?.content === "string" ? [c.choices[0].delta.content] : [])).join("");
   expect(content).toBe("Hello world");
   expect(chunks.find((c) => c.choices?.[0]?.finish_reason)?.choices?.[0]?.finish_reason).toBe("stop");
-  expect(chunks.find((c) => c.usage)?.usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  expect(chunks.find((c) => c.usage)?.usage).toEqual({
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    total_tokens: 15,
+    prompt_tokens_details: { cached_tokens: 0 },
+  });
 });
 
 test("reports cached_tokens from input_tokens_details with prompt total unchanged", async () => {
@@ -81,7 +94,12 @@ test("reports cached_tokens from input_tokens_details with prompt total unchange
     await collectText(responsesStreamToOpenAI(upstream, { model: "gpt-5.4", report: (u) => { reported = u; } })),
   );
   // input_tokens already includes cache, so the prompt total is unchanged.
-  expect(chunks.find((c) => c.usage)?.usage).toEqual({ prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 });
+  expect(chunks.find((c) => c.usage)?.usage).toEqual({
+    prompt_tokens: 100,
+    completion_tokens: 5,
+    total_tokens: 105,
+    prompt_tokens_details: { cached_tokens: 80 },
+  });
   expect(reported).toEqual({ promptTokens: 100, completionTokens: 5, cachedTokens: 80 });
 });
 

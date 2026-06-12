@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "shim-cli",
+      "name": "cursor-relay",
       "dependencies": {
         "@opentui/core": "^0.3.4",
         "cloudflared": "^0.7.1",
