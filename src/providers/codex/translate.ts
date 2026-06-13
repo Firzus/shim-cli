@@ -1,4 +1,5 @@
 import type { Effort } from "../types.ts";
+import { createHash } from "node:crypto";
 import { chatChunk, extractText, newCompletionId, sse, SSE_DONE } from "../../openai.ts";
 import { parseSSEEvent, sseBlocks } from "../../sse.ts";
 
@@ -14,6 +15,8 @@ const EFFORT_MAP: Record<Effort, string> = {
   high: "high",
   xhigh: "xhigh",
 };
+
+const PROMPT_CACHE_KEY_MAX = 64;
 
 export interface CodexOptions {
   model: string;
@@ -85,12 +88,50 @@ export function buildResponsesRequest(
     stream: true,
     store: false,
     reasoning: { effort: EFFORT_MAP[opts.effort] },
-    prompt_cache_key: `cursor-relay:codex:${opts.model}`,
+    prompt_cache_key: codexPromptCacheKey(body, opts.model),
     prompt_cache_retention: "24h",
   };
   const tools = mapTools(body.tools);
   if (tools) req.tools = tools;
   return req;
+}
+
+/**
+ * Stable per-conversation cache key. Cursor does not send a conversation id to
+ * the OpenAI-compatible proxy, so the immutable first user turn is the best
+ * local proxy for one. The key is also short enough for Responses limits.
+ */
+export function codexPromptCacheKey(body: Record<string, unknown>, model: string): string {
+  const explicit = normalizePromptCacheKey(body.prompt_cache_key);
+  if (explicit) return explicit;
+  const seed = firstUserText(body) || fallbackConversationSeed(body);
+  return `cr-cdx-${shortHash(model, 10)}-${shortHash(seed, 40)}`;
+}
+
+function normalizePromptCacheKey(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length <= PROMPT_CACHE_KEY_MAX && /^[A-Za-z0-9_.:-]+$/.test(trimmed)) return trimmed;
+  return `cr-cdx-explicit-${shortHash(trimmed, 48)}`;
+}
+
+function firstUserText(body: Record<string, unknown>): string {
+  const messages = Array.isArray(body.messages) ? (body.messages as Array<Record<string, unknown>>) : [];
+  const firstUser = messages.find((m) => m.role === "user");
+  return firstUser ? extractText(firstUser.content) : "";
+}
+
+function fallbackConversationSeed(body: Record<string, unknown>): string {
+  const stable = {
+    messages: Array.isArray(body.messages) ? body.messages : undefined,
+    input: Array.isArray(body.input) || typeof body.input === "string" ? body.input : undefined,
+  };
+  return JSON.stringify(stable);
+}
+
+function shortHash(value: string, length: number): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, length);
 }
 
 /** Nested Chat tools `{function:{...}}` -> flat Responses tools `{type:function, name, parameters}`. */

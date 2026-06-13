@@ -1,4 +1,3 @@
-import { ulid } from "ulid";
 import type { ChatContext, Provider, ProviderModel } from "../types.ts";
 import { fetchWithAuthRetry, upstreamBodyOrThrow } from "../shared.ts";
 import { buildResponsesRequest, responsesStreamToOpenAI } from "./translate.ts";
@@ -35,15 +34,21 @@ export const codexProvider: Provider = {
       model: ctx.selection.model,
       effort: ctx.selection.effort,
     });
-    const sessionId = ulid().toLowerCase();
+    const sessionId = body.prompt_cache_key ?? ctx.requestId;
 
     const call = (requestBody: typeof body) =>
       fetchWithAuthRetry(getAuth, invalidateAuthCache, (auth) =>
         callCodex(requestBody, { accessToken: auth.accessToken, accountId: auth.chatgptAccountId }, sessionId, ctx.signal),
       );
     let res = await call(body);
-    if (await rejectsPromptCacheControls(res)) {
-      res = await call(withoutPromptCacheControls(body));
+    let requestBody = body;
+    if (await rejectsPromptCacheRetention(res)) {
+      requestBody = withoutPromptCacheRetention(requestBody);
+      res = await call(requestBody);
+    }
+    if (await rejectsPromptCacheKey(res)) {
+      requestBody = withoutPromptCacheKey(requestBody);
+      res = await call(requestBody);
     }
     const upstreamBody = await upstreamBodyOrThrow(res, "Codex");
 
@@ -54,15 +59,28 @@ export const codexProvider: Provider = {
   },
 };
 
-async function rejectsPromptCacheControls(res: Response): Promise<boolean> {
+async function rejectsPromptCacheRetention(res: Response): Promise<boolean> {
   if (res.status !== 400 && res.status !== 422) return false;
   const text = await safeResponseText(res.clone(), { limit: 1000, fallback: "" });
-  return text.includes("prompt_cache_key") || text.includes("prompt_cache_retention");
+  return text.includes("prompt_cache_retention");
 }
 
-function withoutPromptCacheControls<T extends { prompt_cache_key?: string; prompt_cache_retention?: string }>(
+async function rejectsPromptCacheKey(res: Response): Promise<boolean> {
+  if (res.status !== 400 && res.status !== 422) return false;
+  const text = await safeResponseText(res.clone(), { limit: 1000, fallback: "" });
+  return text.includes("prompt_cache_key");
+}
+
+function withoutPromptCacheRetention<T extends { prompt_cache_retention?: string }>(
   body: T,
-): Omit<T, "prompt_cache_key" | "prompt_cache_retention"> {
-  const { prompt_cache_key: _key, prompt_cache_retention: _retention, ...rest } = body;
+): Omit<T, "prompt_cache_retention"> {
+  const { prompt_cache_retention: _retention, ...rest } = body;
+  return rest;
+}
+
+function withoutPromptCacheKey<T extends { prompt_cache_key?: string }>(
+  body: T,
+): Omit<T, "prompt_cache_key"> {
+  const { prompt_cache_key: _key, ...rest } = body;
   return rest;
 }

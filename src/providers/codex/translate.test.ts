@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { buildResponsesRequest } from "./translate.ts";
+import { buildResponsesRequest, codexPromptCacheKey } from "./translate.ts";
 
 test("maps system to instructions, messages to input[], and effort to reasoning", () => {
   const body = {
@@ -14,11 +14,49 @@ test("maps system to instructions, messages to input[], and effort to reasoning"
   expect(out.model).toBe("gpt-5.4");
   expect(out.instructions).toBe("be terse");
   expect(out.reasoning).toEqual({ effort: "high" });
-  expect(out.prompt_cache_key).toBe("cursor-relay:codex:gpt-5.4");
+  expect(out.prompt_cache_key).toMatch(/^cr-cdx-[A-Za-z0-9_-]{10}-[A-Za-z0-9_-]{40}$/);
   expect(out.prompt_cache_retention).toBe("24h");
   expect(out.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "hi" }] }]);
   expect(out.stream).toBe(true);
   expect(out.store).toBe(false);
+});
+
+test("builds a stable conversation-scoped prompt cache key from the first user turn", () => {
+  const first = codexPromptCacheKey(
+    {
+      messages: [
+        { role: "system", content: "dynamic system may change" },
+        { role: "user", content: "implement the cache fix" },
+        { role: "assistant", content: "working" },
+      ],
+    },
+    "gpt-5.5",
+  );
+  const followup = codexPromptCacheKey(
+    {
+      messages: [
+        { role: "system", content: "different system should not split the conversation key" },
+        { role: "user", content: "implement the cache fix" },
+        { role: "assistant", content: "working" },
+        { role: "user", content: "continue" },
+      ],
+    },
+    "gpt-5.5",
+  );
+  const other = codexPromptCacheKey({ messages: [{ role: "user", content: "review the cache fix" }] }, "gpt-5.5");
+
+  expect(first).toBe(followup);
+  expect(first).not.toBe(other);
+  expect(first.length).toBeLessThanOrEqual(64);
+});
+
+test("preserves a valid caller prompt_cache_key and hashes unsafe long keys", () => {
+  expect(codexPromptCacheKey({ prompt_cache_key: "cursor-thread-123", messages: [] }, "gpt-5.5")).toBe(
+    "cursor-thread-123",
+  );
+  const long = codexPromptCacheKey({ prompt_cache_key: "x".repeat(200), messages: [] }, "gpt-5.5");
+  expect(long).toMatch(/^cr-cdx-explicit-[A-Za-z0-9_-]{48}$/);
+  expect(long.length).toBeLessThanOrEqual(64);
 });
 
 test("converts nested OpenAI tools to flat Responses function tools", () => {

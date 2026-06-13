@@ -19,18 +19,24 @@ where the selected model supports it.
 
 For Codex requests, cursor-relay sends:
 
-- `prompt_cache_key: "cursor-relay:codex:<model>"`, so repeated Cursor sessions
-  for the same Codex model route consistently when their prompt prefixes match.
+- `prompt_cache_key` scoped to the conversation. If the caller supplies a valid
+  key, it is preserved. Otherwise cursor-relay derives a short stable key from
+  the upstream model and the first user turn, which is the only immutable
+  conversation identity Cursor exposes through Chat Completions.
 - `prompt_cache_retention: "24h"`, requesting extended retention for eligible
   Responses models.
+
+The same conversation key is used as the Codex upstream session/conversation id
+so the private Codex backend sees stable request continuity across turns, rather
+than a fresh random session for every proxied request.
 
 The Codex provider also sorts function tools by name before sending them to
 Responses, matching the Claude provider's prefix-stability rule.
 
-If the private ChatGPT Codex backend rejects either prompt-cache control, the
-provider retries the same request without those controls rather than failing the
-chat. The retry preserves compatibility while keeping the optimized path as the
-default.
+If the private ChatGPT Codex backend rejects `prompt_cache_retention`, the
+provider retries without retention but keeps `prompt_cache_key`. Only an
+explicit `prompt_cache_key` rejection removes the key. The retry preserves
+compatibility while keeping the cache-optimized path as intact as possible.
 
 ## Consequences
 
