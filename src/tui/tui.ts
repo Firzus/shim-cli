@@ -771,6 +771,10 @@ const ACCENT = "#22d3ee";
 /** Dim grey for the quiet chrome: frame borders and titles. */
 const CHROME = "#3a414d";
 
+/** Opaque dark surface for modal overlays — paints over the activity stream so
+ * picker boxes read as a raised panel instead of letting content bleed through. */
+const SURFACE = "#11161d";
+
 /** Default-brightness chunk for values — the data the operator's eye lands on. */
 function value(text: string): TextChunk {
   return stringToStyledText(text).chunks[0] ?? stringToStyledText(" ").chunks[0]!;
@@ -1006,6 +1010,7 @@ export async function runTui(): Promise<void> {
     left: 0,
     width: "100%",
     height: "100%",
+    backgroundColor: SURFACE,
     justifyContent: "center",
     alignItems: "center",
     visible: false,
@@ -1033,6 +1038,7 @@ export async function runTui(): Promise<void> {
     border: true,
     borderStyle: "rounded",
     borderColor: ACCENT,
+    backgroundColor: SURFACE,
     titleColor: ACCENT,
     paddingLeft: 1,
     paddingRight: 1,
